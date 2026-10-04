@@ -3430,17 +3430,6 @@ app.whenReady().then(async () => {
     tray = new Tray(resizedIcon);
     refreshPauseTray = () => {
     const contextMenu = Menu.buildFromTemplate([
-      { label: pauseReason || "Rovyl is active", enabled: false },
-      { type: "separator" },
-      {
-        label: Date.now() < pauseUntil ? "Resume Rovyl" : "Pause for 30 minutes",
-        click: () => {
-          pauseUntil = Date.now() < pauseUntil ? 0 : Date.now() + 30 * 60 * 1000;
-          pausePolicyVersion += 1;
-          sendMouseContext("CONTEXT 0");
-          void refreshPauseState().then(() => refreshPauseTray());
-        },
-      },
       {
         label: "Open Settings",
         click: async () => {
@@ -3454,7 +3443,7 @@ app.whenReady().then(async () => {
       },
       { label: "Quit", click: () => app.quit() },
     ]);
-    tray.setToolTip(pauseReason ? `Rovyl — ${pauseReason}` : "Rovyl is active");
+    tray.setToolTip(pauseReason ? `Rovyl — ${pauseReason}` : "Rovyl");
     tray.setContextMenu(contextMenu);
     };
     refreshPauseTray();

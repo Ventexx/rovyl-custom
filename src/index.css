@@ -395,7 +395,7 @@
 /* A miniatura e um quadrado com tudo posicionado a partir do centro. */
 .zs-ws-preview { position: relative; display: grid; place-items: center; width: 92px; height: 92px; color: var(--zn-text-2); }
 .zs-ws-preview-ring { position: absolute; width: 68px; height: 68px; border: 1px dashed; border-radius: 50%; }
-.zs-ws-preview-hub { position: absolute; width: 16px; height: 16px; border-radius: 50%; }
+.zs-ws-preview-hub { position: absolute; width: 26px; height: 26px; display: grid; place-items: center; }
 .zs-ws-preview-slot {
   position: absolute; display: grid; place-items: center; width: 18px; height: 18px;
   overflow: hidden; border-radius: 5px; background: var(--zn-surface); box-shadow: 0 0 0 1px var(--zn-line);
@@ -981,4 +981,33 @@
   .zn-radial-label,
   .zn-radial-pill,
   .zn-radial-scrim { transition-duration: .01ms !important; }
+}
+
+/* Compact icon browsing controls keep the grid as the main content. */
+.zs-icon-library-toolbar { justify-content: flex-start; flex-wrap: wrap; gap: 8px; }
+.zs-icon-library-toolbar select { min-width: 0; max-width: 210px; padding: 8px 10px; border: 1px solid var(--zn-line); border-radius: 7px; background: var(--zn-surface); color: var(--zn-text); font: inherit; font-size: 12px; }
+.zs-icon-library-toolbar > button { margin-left: auto; }
+.zs-icon-library-toolbar > .zs-icon-library-search { margin-left: auto; width: 180px; max-width: 100%; height: 34px; padding: 6px 8px; gap: 6px; }
+.zs-icon-library-search > svg, .zs-icon-library-search > button { flex-shrink: 0; }
+.zs-icon-library-search input { font-size: 12px; }
+.zs-icon-library-search:focus-within { border-color: var(--zn-text-2); }
+.zs-icon-library-count { flex-shrink: 0; color: var(--zn-text-2); font-size: 11px; }
+
+/* Keep the preview beside shortcuts at every window size. */
+.zs-workspace-workbench.has-preview { grid-template-columns: minmax(210px, .95fr) minmax(230px, 1.2fr); gap: 16px; align-items: start; overflow-x: auto; }
+.zs-wheel-preview { padding: 12px; }
+.zs-preview-orbit { width: 100%; max-width: 300px; aspect-ratio: 1; }
+.zs-preview-orbit > button { width: clamp(48px, 6vw, 76px); }
+.zs-item-popup-layer { position: fixed; inset: 0; z-index: 10000; display: grid; place-items: center; padding: 24px; background: rgba(0,0,0,.45); color: var(--zn-text); }
+.zs-item-popup { width: min(460px, 100%); max-height: calc(100vh - 48px); overflow-y: auto; border: 1px solid var(--zn-line); border-radius: 12px; background: var(--zn-surface); box-shadow: 0 18px 60px #0005; }
+.zs-item-popup > header { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; background: var(--zn-surface); border-bottom: 1px solid var(--zn-line); }
+.zs-item-popup .zs-workspace-item-editor { padding: 16px; }
+.zs-item-popup .zs-workspace-item-editor > .zs-field { max-width: none; }
+
+.zs-workspace-workbench.has-preview > .zs-wheel-preview { grid-column: 1; grid-row: 1; }
+.zs-workspace-workbench.has-preview > .zs-workspace-items { grid-column: 2; grid-row: 1; }
+@media (max-height: 650px) {
+  .zs-preview-orbit { max-width: 180px; margin-block: 8px; }
+  .zs-preview-orbit > button { width: 48px; padding: 4px 2px; gap: 2px; }
+  .zs-wheel-preview > p { font-size: 10px; }
 }

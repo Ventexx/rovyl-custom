@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import {
@@ -1266,12 +1267,13 @@ function WorkspaceItemIcon({ item }: { item: AppItem }) {
  * que era precisamente o que dava sentido a poder reordena-los.
  */
 function WorkspaceWheelPreview({ workspace, accent }: { workspace: Workspace; accent: string }) {
+  const WorkspaceIcon = getIcon(workspace.pickerIconName?.trim() || 'Layers');
   const items = workspace.apps.slice(0, 8);
   const radius = 34;
   return (
     <div className="zs-ws-preview" aria-hidden>
       <span className="zs-ws-preview-ring" style={{ borderColor: `${accent}44` }} />
-      <span className="zs-ws-preview-hub" style={{ background: accent }} />
+      <span className="zs-ws-preview-hub" style={{ color: accent }}><WorkspaceIcon size={22} strokeWidth={1.8} /></span>
       {items.map((item, index) => {
         const angle = ((index * (360 / items.length)) - 90) * (Math.PI / 180);
         const Icon = getIcon(itemFallbackIcon(item));
@@ -1444,16 +1446,17 @@ function WorkspaceManager({
 
   /** Um modal que só fecha com o rato é um modal que prende quem usa o teclado. */
   useEffect(() => {
-    if (!isIconPickerOpen) return;
+    if (!isIconPickerOpen && editingIndex === null) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       /** Não deixar o Escape subir e fechar o editor do workspace por baixo. */
       event.stopPropagation();
       setIsIconPickerOpen(false);
+      setEditingIndex(null);
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [isIconPickerOpen]);
+  }, [isIconPickerOpen, editingIndex]);
   const WorkspaceIcon = getIcon(workspace.pickerIconName?.trim() || 'Layers');
 
   const addItem = (item: AppItem, openEditor = false) => {
@@ -1773,7 +1776,7 @@ function WorkspaceManager({
               <header>
                 <div>
                   <b id="ws-icon-modal-title">Workspace icon</b>
-                  <small>Shown in the wheel picker, and on the workspace card.</small>
+                  <small>Choose from the offline icon library.</small>
                 </div>
                 <button type="button" onClick={() => setIsIconPickerOpen(false)} aria-label="Close icon picker">
                   <X size={14} />
@@ -1872,7 +1875,7 @@ function WorkspaceManager({
           )}
         </AnimatePresence>
 
-        {!addMode && <section className="zs-wheel-preview" aria-label="Workspace wheel preview"><h3>Your wheel</h3><p>Click an app to edit. Drag it to another position.</p><div className="zs-preview-orbit" style={{ width: Math.max(280, workspace.apps.length * 25), height: Math.max(280, workspace.apps.length * 25) }}><div className="zs-preview-center"><WorkspaceIcon size={24} /><span>{workspace.name}</span></div>{workspace.apps.map((item, index) => {
+        {!addMode && <section className="zs-wheel-preview" aria-label="Workspace wheel preview"><h3>Your wheel</h3><p>Click an app to edit. Drag it to another position.</p><div className="zs-preview-orbit" ><div className="zs-preview-center"><WorkspaceIcon size={24} /><span>{workspace.name}</span></div>{workspace.apps.map((item, index) => {
           const angle = (index * 360 / workspace.apps.length - 90) * Math.PI / 180;
           return <button type="button" key={item.id} className={editingIndex === index ? 'is-selected' : ''} style={{ left: `${50 + 37 * Math.cos(angle)}%`, top: `${50 + 37 * Math.sin(angle)}%` }} aria-label={`Edit ${item.label}, position ${index + 1}`} aria-pressed={editingIndex === index} draggable onDragStart={event => { event.dataTransfer.setData('text/plain', String(index)); setItemDragIndex(index); }} onDragEnd={() => setItemDragIndex(null)} onDragOver={event => { if (itemDragIndex !== null) event.preventDefault(); }} onDrop={event => { event.preventDefault(); if (itemDragIndex !== null) reorderItems(itemDragIndex, itemDragIndex < index ? index + 1 : index); setItemDragIndex(null); }} onClick={() => setEditingIndex(index)}><WorkspaceItemIcon item={item} /><span>{index + 1}. {item.label}</span></button>;
         })}{!workspace.apps.length && <button type="button" className="zs-preview-empty" onClick={() => openAppPicker()}><Plus size={22} /><span>Add your first apps</span></button>}</div></section>}
@@ -1942,7 +1945,16 @@ function WorkspaceManager({
                   <button type="button" onClick={() => removeItem(index)} aria-label={`Remove ${item.label}`}><Trash2 size={13} /></button>
                 </div>
               </div>
-              {editingIndex === index && (
+              {editingIndex === index && !addMode && createPortal(
+                <div className="zs-shell zs-item-popup-layer" data-zn-theme={config.appearanceTheme === 'white' ? 'white' : 'black'} onClick={() => setEditingIndex(null)}>
+                <section className="zs-item-popup" role="dialog" aria-modal="true" aria-label={`Edit ${item.label}`} onClick={event => event.stopPropagation()} onKeyDown={event => {
+                  if (event.key !== 'Tab') return;
+                  const nodes = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input, select, summary, [tabindex="0"]')).filter(node => node.getClientRects().length);
+                  const first = nodes[0], last = nodes[nodes.length - 1];
+                  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+                  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+                }}>
+                <header><b>Edit {item.label}</b><button autoFocus type="button" className="zs-btn" aria-label="Close shortcut editor" onClick={() => setEditingIndex(null)}><X size={15} /></button></header>
                 <div className="zs-workspace-item-editor">
                   <button type="button" className="zs-btn" onClick={() => openAppPicker(index)}>Replace app</button>
                   <details className="zs-app-icon-details"><summary>Change icon</summary><IconPicker selectedIcon={item.iconName || 'AppWindow'} config={config} onSelect={iconName => updateItem(index, { iconName, iconSource: 'lucide', customIconUrl: undefined })} /></details>
@@ -2053,6 +2065,7 @@ function WorkspaceManager({
                     </div>
                   )}
                 </div>
+                </section></div>, document.body
               )}
             </div>
           );})}

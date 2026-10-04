@@ -144,7 +144,10 @@ if (!process.versions.electron) {
     await window.webContents.executeJavaScript(`document.querySelector('[aria-label="Change workspace icon"]').click()`);
     await waitFor(`!!document.querySelector('.zs-icon-library')`);
     assert.equal(await window.webContents.executeJavaScript(`document.querySelector('[aria-label="Search icon library"]')`), null);
-    await clickText('Gaming');
+    const chooseIconCategory = async value => {
+      await window.webContents.executeJavaScript(`(() => { const select = document.querySelector('[aria-label="Icon category"]'); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(select, ${JSON.stringify(value)}); select.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    };
+    await chooseIconCategory('games');
     await waitFor(`document.querySelectorAll('.zs-icon-library-grid > button').length > 10`);
     await window.webContents.executeJavaScript(`Array.from(document.querySelectorAll('.zs-icon-library-toolbar button')).find(b => b.textContent.includes('Search')).click()`);
     await window.webContents.executeJavaScript(`(() => { const input = document.querySelector('[aria-label="Search icon library"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, 'steam'); input.dispatchEvent(new Event('input', { bubbles: true })); })()`);
@@ -154,9 +157,9 @@ if (!process.versions.electron) {
     await waitFor(`!!document.querySelector('.zs-icon-library-selected svg text')`);
     assert.ok(await window.webContents.executeJavaScript(`document.fonts.load('26px "Rovyl Nerd Symbols"').then(fonts => fonts.length > 0)`));
     await window.webContents.executeJavaScript(`document.querySelector('[aria-label="Add icon to favorites"]').click()`);
-    await clickText('Favorites');
+    await chooseIconCategory('favorites');
     await waitFor(`document.querySelectorAll('.zs-icon-library-grid > button').length === 1`);
-    await clickText('Gaming');
+    await chooseIconCategory('games');
     await new Promise(resolve => setTimeout(resolve, 300));
     fs.writeFileSync(path.join(root, 'build-out', 'icon-picker-preview.png'), (await window.webContents.capturePage()).toPNG());
     await window.webContents.executeJavaScript(`document.querySelector('.zs-shell').setAttribute('data-zn-theme', 'white')`);
@@ -179,9 +182,17 @@ if (!process.versions.electron) {
     await clickText('Cancel');
     await window.webContents.executeJavaScript(`document.querySelector('[aria-label="Edit Test Browser, position 2"]').click()`);
     await waitFor('document.body.innerText.includes("Replace app")');
+    window.setSize(880, 600);
+    await new Promise(resolve => setTimeout(resolve, 800));
+    assert.ok(await window.webContents.executeJavaScript(`(() => { const preview = document.querySelector('.zs-wheel-preview').getBoundingClientRect(); const list = document.querySelector('.zs-workspace-workbench .zs-workspace-items').getBoundingClientRect(); return list.left >= preview.right && Math.abs(list.top - preview.top) < 3; })()`));
+    fs.writeFileSync(path.join(root, 'build-out', 'shortcut-popup-preview.png'), (await window.webContents.capturePage()).toPNG());
     await clickText('Replace app');
     await waitFor('document.body.innerText.includes("Choose one application for this position.")');
     await clickText('Cancel');
+    await window.webContents.executeJavaScript(`document.querySelector('[aria-label="Close shortcut editor"]')?.click()`);
+    await new Promise(resolve => setTimeout(resolve, 800));
+    fs.writeFileSync(path.join(root, 'build-out', 'workspace-small-preview.png'), (await window.webContents.capturePage()).toPNG());
+    window.setSize(1100, 800);
     await window.webContents.executeJavaScript(`document.querySelector('[aria-label="Move Test Browser up"]').click()`);
     await waitFor('!!document.querySelector(\'[aria-label="Edit Test Browser, position 1"]\')');
     await window.webContents.executeJavaScript(`document.querySelector('[aria-label="Remove Test Browser"]').click()`);

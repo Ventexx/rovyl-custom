@@ -11,32 +11,21 @@ const {
   dialog,
   session,
 } = require("electron");
-const { autoUpdater } = require("electron-updater");
 const path = require("path");
 const { exec, spawn, execFile, execFileSync } = require("child_process");
 const os = require("os");
 const fs = require("fs");
 const win32Launch = require("./win32-launch");
 const { normalizeFullPersistenceBlob } = require("./persistence-normalize.cjs");
-const { detectGameExecutable } = require("./game-detection.cjs");
+
 const crypto = require("crypto");
 const { GlobalKeyboardListener } = require("node-global-key-listener");
-const http = require("http");
-const https = require("https");
 const url = require("url");
+const { installOfflinePolicy } = require("./offline-policy.cjs");
+const { initializeProfileDirectory } = require("./profile-directory.cjs");
 
 const isDev = !app.isPackaged;
 
-/**
- * Canal de distribuição. A Microsoft Store proíbe mecanismos próprios de atualização — quem
- * atualiza é a loja — e uma submissão com o `electron-updater` ativo é reprovada na certificação.
- * O mesmo código serve os dois canais; é aqui que se decide qual deles está a correr.
- *
- * `process.windowsStore` é posto pelo Electron quando o processo corre dentro de um pacote MSIX.
- * A variável de ambiente existe só para poder testar o comportamento sem empacotar.
- */
-const isStoreBuild = () =>
-  process.windowsStore === true || process.env.ROVYL_STORE_BUILD === "1";
 const logDir = isDev
   ? path.join(__dirname, "..")
   : path.join(os.homedir(), ".zenith-radial-menu");
@@ -152,70 +141,13 @@ function applyEnvFileContent(content) {
   });
 }
 
-/**
- * Rovyl keeps one profile for packaged and development builds. During the rebrand,
- * copy the former Zenith profile forward so existing workspaces and preferences survive.
- * `ZENITH_USER_DATA` remains supported as a backwards-compatible environment override.
- * Must run before any `app.getPath("userData")`.
- */
+/** Select the custom profile before any reads; explicit overrides skip migration. */
 function ensureUnifiedUserDataDirectory() {
-  const udOverride = (
-    process.env.ROVYL_USER_DATA ||
-    process.env.ZENITH_USER_DATA ||
-    ""
-  ).trim();
-  if (udOverride) {
-    try {
-      app.setPath("userData", udOverride);
-      diagLog(`[Persist] userData override=${app.getPath("userData")}`);
-      return;
-    } catch (e) {
-      console.error("ROVYL_USER_DATA setPath failed:", e.message);
-    }
-  }
-
-  try {
-    const appData = app.getPath("appData");
-    const unifiedDir = path.join(appData, "Rovyl");
-    const unifiedCfg = path.join(unifiedDir, "config-v2.json");
-    const legacyDirs = [
-      path.join(appData, "Zenith OS"),
-      path.join(appData, "zenith-radial-menu"),
-    ];
-    const legacyDir = legacyDirs.find((dir) =>
-      fs.existsSync(path.join(dir, "config-v2.json")),
-    );
-
-    if (!fs.existsSync(unifiedCfg) && legacyDir) {
-      if (!fs.existsSync(unifiedDir)) {
-        fs.mkdirSync(unifiedDir, { recursive: true });
-      }
-      for (const f of [
-        "config-v2.json",
-        "config-v2.json.bak",
-        "settings.json",
-        "zenith-persistence.log",
-        "rovyl-persistence.log",
-        "icon-cache.json",
-      ]) {
-        const src = path.join(legacyDir, f);
-        const dst = path.join(unifiedDir, f);
-        if (fs.existsSync(src) && !fs.existsSync(dst)) {
-          try {
-            fs.copyFileSync(src, dst);
-            diagLog(`[Persist] Migrated legacy profile ${f} → Rovyl userData`);
-          } catch (e) {
-            diagLog(`[Persist] Migrate ${f} failed: ${e.message}`);
-          }
-        }
-      }
-    }
-
-    app.setPath("userData", unifiedDir);
-    diagLog(`[Persist] Rovyl userData: ${unifiedDir}`);
-  } catch (e) {
-    console.error("ensureUnifiedUserDataDirectory:", e.message);
-  }
+  const override = (process.env.ROVYL_USER_DATA || process.env.ZENITH_USER_DATA || "").trim();
+  const directory = override || initializeProfileDirectory(app.getPath("appData"), diagLog);
+  fs.mkdirSync(directory, { recursive: true });
+  app.setPath("userData", directory);
+  diagLog(`[Persist] userData=${directory}`);
 }
 
 /**
@@ -708,7 +640,12 @@ function mergeGameModeConfig(gm) {
     mode: gm.mode === "all" ? "all" : "list",
     blockedApps: blocked,
     autoDetectGames: !!gm.autoDetectGames,
+    pauseFullscreen: gm.pauseFullscreen ?? (!!gm.enabled && gm.mode === "all"),
+    pauseSelected: gm.pauseSelected ?? (!!gm.enabled && gm.mode !== "all"),
   };
+  pausePolicyVersion += 1;
+  sendMouseContext(`CONTEXT ${gameModeConfig.pauseFullscreen || gameModeConfig.pauseSelected || Date.now() < pauseUntil ? 0 : -1}`);
+  void refreshPauseState();
 }
 
 /** Full persistence blob is `{ config: UIConfig, ... }`; older saves may be flat. */
@@ -842,19 +779,9 @@ function applyMousePolicyAfterReveal(win) {
 
 /** When true, allow BrowserWindow to close (real quit). Otherwise close → hide to tray. */
 let isAppQuitting = false;
-/**
- * Parar o gatilho no fecho — e é um requisito de ATUALIZAÇÃO, não de higiene.
- *
- * O processo PowerShell do gatilho vive dentro da pasta de instalação. Se sobreviver ao fecho da
- * app, mantém um handle aberto sobre `mouse-blocker.ps1`, o instalador NSIS não consegue substituir
- * os ficheiros, e a atualização falha em silêncio: no arranque seguinte a app encontra a mesma
- * versão nova e volta a propô-la. Para sempre.
- *
- * A função vive dentro de `app.whenReady`; esta referência é como o `will-quit` lhe chega.
- */
+// Stop the native mouse helper on every exit, including the persistence-flush path.
 let stopMouseHookForShutdown = () => {};
 
-let updateInstallInProgress = false;
 /** Ensures renderer runs saveFullConfigSync before exit (tray "Sair" / OS shutdown paths). */
 let zenithQuitFlushStarted = false;
 /**
@@ -866,10 +793,6 @@ let skipQuitFlushForImport = false;
 
 app.on("before-quit", (event) => {
   isAppQuitting = true;
-  // `quitAndInstall` must not be delayed by the normal renderer persistence handshake.
-  if (updateInstallInProgress) {
-    return;
-  }
   if (zenithQuitFlushStarted) {
     return;
   }
@@ -891,15 +814,9 @@ app.on("before-quit", (event) => {
     if (finished) return;
     finished = true;
     if (timeoutId != null) clearTimeout(timeoutId);
-    /**
-     * Update already downloaded: install it HERE, after the flush.
-     *
-     * `electron-updater`'s `autoInstallOnAppQuit` hooks the `quit` event, and this exit is an
-     * `app.exit(0)` — which skips `will-quit` and leaves the PowerShell helpers alive, holding
-     * files inside the install directory. The update was never applied: the same version was
-     * downloaded and offered again on every launch, forever.
-     */
-    if (beginUpdateInstall()) return;
+    stopMouseHookForShutdown();
+    stopRadialMouseBlocker();
+    stopForegroundFocusHelper();
     app.exit(0);
   };
 
@@ -1174,6 +1091,9 @@ function attachWindowUserRestoreGuards(window) {
 }
 
 function setupMainWindow(window) {
+  // Navigation never opens an external page inside the launcher.
+  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  window.webContents.on("will-navigate", (event) => event.preventDefault());
   // Nível máximo de sobreposição
   window.setAlwaysOnTop(true, "screen-saver", 1);
 
@@ -1731,8 +1651,13 @@ function ensureRadialMouseBlocker() {
     { windowsHide: true },
   );
   radialMouseBlocker = child;
+  let outputBuffer = "";
   child.stdout.on("data", (data) => {
-    const text = data.toString();
+    outputBuffer += data.toString();
+    const end = outputBuffer.lastIndexOf("\n");
+    if (end < 0) return;
+    const text = outputBuffer.slice(0, end + 1);
+    outputBuffer = outputBuffer.slice(end + 1);
     if (radialTriggerListener && text.includes("TRIGGER_")) {
       try {
         radialTriggerListener(text);
@@ -1743,8 +1668,16 @@ function ensureRadialMouseBlocker() {
     /** Linha isolada: "TRIGGER_READY" tambem contem READY e nao anuncia o arranque. */
     if (!/^READY\s*$/m.test(text)) return;
     radialMouseBlockerReady = true;
+    child.stdin.write(`${lastMouseContext}\n`);
     /** It is up: the next death starts counting from scratch. */
     radialMouseBlockerRestartAttempts = 0;
+    // Blocking and trigger capture are independent state. Startup window cleanup can
+    // replace or clear the pending block command while PowerShell is still compiling.
+    const pendingBlockCommand = pendingRadialMouseBlockCommand;
+    if (lastRadialTriggerCommand) {
+      writeRadialMouseBlocker(lastRadialTriggerCommand);
+    }
+    pendingRadialMouseBlockCommand = pendingBlockCommand;
     if (pendingRadialMouseBlockCommand) {
       const command = pendingRadialMouseBlockCommand;
       pendingRadialMouseBlockCommand = null;
@@ -1777,11 +1710,9 @@ function ensureRadialMouseBlocker() {
 }
 
 function setRadialMouseBlocking(bounds, monitorBounds) {
-  if (process.platform !== "win32") return;
-  ensureRadialMouseBlocker();
-  writeRadialMouseBlocker(
-    `BLOCK ${bounds.x} ${bounds.y} ${bounds.width} ${bounds.height} ${monitorBounds.x} ${monitorBounds.y} ${monitorBounds.width} ${monitorBounds.height}`,
-  );
+  // Never suppress input to other desktop windows. A stale radial state must
+  // not turn an invisible wheel into a monitor-wide input lock.
+  clearRadialMouseBlocking();
 }
 
 /**
@@ -2149,7 +2080,7 @@ function updateWindowSize(mode, anchorScreenPoint) {
     mainWindow.setAlwaysOnTop(true, "screen-saver", 1);
     mainWindow.setResizable(true);
     try {
-      if (!mainWindow.isVisible()) mainWindow.showInactive();
+      mainWindow.hide();
       mainWindow.webContents.setBackgroundThrottling(true);
     } catch (e) {
       /* ignore */
@@ -2472,286 +2403,56 @@ function foregroundMatchesBlockedList(win, tokens) {
   return tokensMatchForeground(ownerPath, wtitle, "", tokens);
 }
 
-const autoDetectedGameCache = new Map();
-const AUTO_GAME_CACHE_LIMIT = 256;
-
-function foregroundLooksLikeGame(exePath, cmdline = "") {
-  const exe = String(exePath || "").trim();
-  if (!exe) return false;
-  const commandSignal = /steam_appid|-epicapp=|-epicportal|-fromfl=eac/i.test(String(cmdline || ""));
-  const cacheKey = exe.toLowerCase();
-  if (!commandSignal && autoDetectedGameCache.has(cacheKey)) {
-    return autoDetectedGameCache.get(cacheKey);
+// Explicit pause rules. Check off the native hook thread; that thread only compares HWNDs.
+let pauseUntil = 0;
+let pauseReason = '';
+let pauseCheckRunning = false;
+let pausePolicyVersion = 0;
+let refreshPauseTray = () => {};
+let lastMouseContext = 'CONTEXT -1';
+function sendMouseContext(command) {
+  lastMouseContext = command;
+  if (radialMouseBlockerReady && radialMouseBlocker?.stdin?.writable) {
+    radialMouseBlocker.stdin.write(`${command}\n`);
   }
-  const result = detectGameExecutable({ exePath: exe, cmdline });
-  if (!commandSignal) {
-    autoDetectedGameCache.delete(cacheKey);
-    autoDetectedGameCache.set(cacheKey, result);
-    while (autoDetectedGameCache.size > AUTO_GAME_CACHE_LIMIT) {
-      const oldest = autoDetectedGameCache.keys().next().value;
-      if (!oldest) break;
-      autoDetectedGameCache.delete(oldest);
-    }
-  }
-  return result;
 }
-
-// Main function to decide if we should open (atalho global + botão do meio)
+async function getPauseDecision() {
+  if (Date.now() < pauseUntil) return { reason: 'Paused for 30 minutes', context: 0 };
+  pauseUntil = 0;
+  const fullscreen = gameModeConfig.pauseFullscreen;
+  const selected = gameModeConfig.pauseSelected;
+  if (!fullscreen && !selected) return { reason: '', context: -1 };
+  let foreground;
+  try { foreground = await getActiveWinModule()?.(); } catch (_) {}
+  if (!foreground) return { reason: 'Paused — cannot identify active app', context: 0 };
+  if (selected && foregroundMatchesBlockedList(foreground, parseBlockedAppTokens(gameModeConfig.blockedApps))) {
+    return { reason: 'Paused — selected app', context: 0 };
+  }
+  if (fullscreen && isForegroundWindowFullscreen(foreground)) {
+    return { reason: 'Paused — fullscreen app', context: 0 };
+  }
+  return { reason: '', context: Number(foreground.id) || 0 };
+}
+async function refreshPauseState() {
+  if (pauseCheckRunning) return;
+  pauseCheckRunning = true;
+  const version = pausePolicyVersion;
+  try {
+    const decision = await getPauseDecision();
+    if (version !== pausePolicyVersion) return;
+    sendMouseContext(`CONTEXT ${decision.context}`);
+    if (pauseReason !== decision.reason) {
+      pauseReason = decision.reason;
+      refreshPauseTray();
+    }
+  } finally { pauseCheckRunning = false; }
+}
 const shouldOpenMenu = async () => {
-  const decisionStartedAt = Date.now();
-  if (!gameModeConfig.enabled) return true;
-
-  const mode = gameModeConfig.mode === "all" ? "all" : "list";
-  const tokens = parseBlockedAppTokens(gameModeConfig.blockedApps);
-  const autoDetectGames = mode === "list" && !!gameModeConfig.autoDetectGames;
-
-  let activeResult = null;
-  const aw = getActiveWinModule();
-  if (aw) {
-    try {
-      activeResult = await aw();
-    } catch (e) {
-      diagLog(`[GameMode] active-win() failed: ${e.message}`);
-    }
-  }
-
-  if (mode === "all") {
-    if (activeResult && isForegroundWindowFullscreen(activeResult)) {
-      diagLog("[GameMode] Blocked: foreground fullscreen (mode=all)");
-      return false;
-    }
-    /**
-     * Caminho rápido para produtividade diária: `active-win` cobre o caso normal de fullscreen.
-     * O fallback PowerShell era usado em toda abertura e pode custar 1-2s no Windows.
-     */
-    if (activeResult) return true;
-  }
-
-  /**
-   * `active-win` já entrega executável, título e limites da janela ativa. No modo
-   * de lista isso é tudo de que precisamos para decidir o caso normal. Antes,
-   * mesmo com esses dados válidos, cada acionamento ainda iniciava um novo
-   * PowerShell; essa criação de processo acontecia antes de `showMenuAtCursor`
-   * e era percebida como atraso do radial.
-   */
-  if (mode === "list" && activeResult) {
-    const listed = foregroundMatchesBlockedList(activeResult, tokens);
-    const fullscreen = isForegroundWindowFullscreen(activeResult);
-    const activeOwnerPath = activeResult?.owner?.path || "";
-    const autoGame =
-      autoDetectGames &&
-      !!activeOwnerPath &&
-      !isZenithOwnExePath(activeOwnerPath) &&
-      foregroundLooksLikeGame(activeOwnerPath);
-
-    if (fullscreen && (listed || autoGame)) {
-      diagLog(
-        `[GameMode] Blocked: protected fullscreen app (native, decision=${Date.now() - decisionStartedAt}ms)`,
-      );
-      return false;
-    }
-
-    const decisionMs = Date.now() - decisionStartedAt;
-    if (decisionMs >= 20) {
-      diagLog(`[GameMode] Native decision latency=${decisionMs}ms`);
-    }
-    return true;
-  }
-
-  let fgCtx = { exe: null, title: "", cmdline: "", bounds: null };
-  if (process.platform === "win32") {
-    fgCtx = await getForegroundContextWindows();
-  }
-
-  if (mode === "all") {
-    if (
-      process.platform === "win32" &&
-      fgCtx.bounds &&
-      fgCtx.exe &&
-      !isZenithOwnExePath(fgCtx.exe) &&
-      isBoundsFullscreenMonitor(fgCtx.bounds, fgCtx.exe)
-    ) {
-      diagLog("[GameMode] Blocked: foreground fullscreen (mode=all, PS)");
-      return false;
-    }
-    return true;
-  }
-
-  // mode === "list": apps escolhidos e, opcionalmente, jogos detectados automaticamente.
-  if (tokens.length === 0 && !autoDetectGames) return true;
-
-  const listedPs =
-    process.platform === "win32" &&
-    fgCtx.exe &&
-    !isZenithOwnExePath(fgCtx.exe) &&
-    tokensMatchForeground(fgCtx.exe, fgCtx.title, fgCtx.cmdline, tokens);
-  const fullscreenPs =
-    !!fgCtx.bounds &&
-    !!fgCtx.exe &&
-    isBoundsFullscreenMonitor(fgCtx.bounds, fgCtx.exe);
-
-  const listedAw = !!(activeResult && foregroundMatchesBlockedList(activeResult, tokens));
-  const fullscreenAw = !!(activeResult && isForegroundWindowFullscreen(activeResult));
-
-  const autoGamePs =
-    autoDetectGames &&
-    !!fgCtx.exe &&
-    !isZenithOwnExePath(fgCtx.exe) &&
-    foregroundLooksLikeGame(fgCtx.exe, fgCtx.cmdline);
-  const activeOwnerPath = (activeResult?.owner?.path || "").toLowerCase();
-  const autoGameAw =
-    autoDetectGames &&
-    !!activeOwnerPath &&
-    !isZenithOwnExePath(activeOwnerPath) &&
-    foregroundLooksLikeGame(activeOwnerPath);
-
-  if (
-    (listedPs && fullscreenPs) ||
-    (listedAw && fullscreenAw) ||
-    (autoGamePs && fullscreenPs) ||
-    (autoGameAw && fullscreenAw)
-  ) {
-    diagLog(
-      `[GameMode] Blocked: protected fullscreen app (listPs=${!!(listedPs && fullscreenPs)} listAw=${!!(listedAw && fullscreenAw)} autoPs=${!!(autoGamePs && fullscreenPs)} autoAw=${!!(autoGameAw && fullscreenAw)})`,
-    );
-    return false;
-  }
-
-  return true;
+  const version = pausePolicyVersion;
+  const decision = await getPauseDecision();
+  return version === pausePolicyVersion && !decision.reason;
 };
-
 let tray = null;
-
-/**
- * Checks GitHub Releases for a newer NSIS build.  This is deliberately disabled
- * in development: `latest.yml` only exists beside a published installer.
- */
-/**
- * O renderer precisa de saber que há atualização para a assinalar na roda — um selo no hub, que
- * o utilizador vê quando abre o menu, sem ninguém lhe interromper o que está a fazer.
- */
-/** Última versão anunciada pelo updater — o painel pede-a ao abrir, para não depender do evento. */
-let lastKnownUpdate = { state: "idle", version: null };
-
-function notifyRendererUpdateState(state, version) {
-  lastKnownUpdate = { state, version: version ?? null };
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  try {
-    mainWindow.webContents.send("update-state", { state, version });
-  } catch (e) {
-    /* ignore */
-  }
-}
-
-/** `1.2.10` > `1.2.9`: compare number by number, not string by string. */
-function isNewerThanInstalled(version) {
-  if (typeof version !== "string" || version.length === 0) return false;
-  const parts = (v) => v.split(/[.+-]/).map((n) => parseInt(n, 10) || 0);
-  const a = parts(version);
-  const b = parts(app.getVersion());
-  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
-    const diff = (a[i] ?? 0) - (b[i] ?? 0);
-    if (diff !== 0) return diff > 0;
-  }
-  return false;
-}
-
-/**
- * Runs the installer for the already-downloaded update and exits. Returns `false` when there is
- * nothing to install — the caller then proceeds with its own exit.
- *
- * Silent, and with relaunch. The installer is the assisted one (`oneClick: false`): in
- * interactive mode the update sat waiting for someone to click "Next" in a window that pops up
- * exactly while the user is closing everything — and if that window was dismissed, nothing was
- * installed and the badge came back on the next launch. With `/S` NSIS replaces the files with no
- * wizard, and `--force-run` brings Rovyl back on its own.
- */
-function beginUpdateInstall() {
-  if (updateInstallInProgress) return false;
-  if (!app.isPackaged || process.platform !== "win32" || isStoreBuild()) return false;
-  if (lastKnownUpdate.state !== "ready") return false;
-
-  diagLog(`[Update] Installing version ${lastKnownUpdate.version ?? "?"}`);
-  updateInstallInProgress = true;
-
-  /**
-   * Stop the helpers BEFORE exiting. `will-quit` stops them too, but not every exit goes through
-   * it, and one orphaned PowerShell holding a file from the install directory is enough to make
-   * the replacement fail.
-   */
-  stopMouseHookForShutdown();
-  stopRadialMouseBlocker();
-  stopForegroundFocusHelper();
-
-  try {
-    autoUpdater.quitAndInstall(true, true);
-  } catch (error) {
-    diagLog(`[Update] quitAndInstall failed: ${error?.message || error}`);
-    updateInstallInProgress = false;
-    return false;
-  }
-
-  /** `quitAndInstall` asks to quit in a `setImmediate`; if anything holds it back, force the exit. */
-  setTimeout(() => app.exit(0), 4000).unref?.();
-  return true;
-}
-
-function configureAutoUpdates() {
-  if (!app.isPackaged || process.platform !== "win32") return;
-
-  /**
-   * Build da Store: nem sequer registamos os listeners. Não basta não chamar `checkForUpdates` —
-   * o `autoInstallOnAppQuit` deixaria o instalador a correr à saída, que é exatamente o
-   * comportamento que a certificação procura.
-   */
-  if (isStoreBuild()) {
-    diagLog("[Update] Build da Store — updater desativado");
-    return;
-  }
-
-  autoUpdater.autoDownload = true;
-  /**
-   * Install-on-quit is ours, in `beginUpdateInstall`. The `electron-updater` one runs on the
-   * `quit` event, which this app does not always emit (it exits through `app.exit(0)`) and which
-   * fires before the helpers stop — an installer running against files that are still open.
-   */
-  autoUpdater.autoInstallOnAppQuit = false;
-
-  autoUpdater.on("error", (error) => {
-    diagLog(`[Update] ${error?.message || error}`);
-  });
-
-  autoUpdater.on("update-available", (info) => {
-    /** Announcing a version that is not above the installed one is the badge asking for what is already done. */
-    if (!isNewerThanInstalled(info?.version)) {
-      diagLog(`[Update] Ignoring version ${info?.version} — not above ${app.getVersion()}`);
-      return;
-    }
-    diagLog(`[Update] Downloading version ${info.version}`);
-    notifyRendererUpdateState("downloading", info.version);
-  });
-
-  /**
-   * Sem caixa nativa.
-   *
-   * O diálogo do sistema aparecia por cima do que o utilizador estivesse a fazer, com o visual do
-   * Windows e um texto noutra língua do resto da app — e para uma coisa que não é urgente: a
-   * atualização JÁ está descarregada e instala-se sozinha ao sair. O aviso passou para onde não
-   * interrompe: o selo no hub do radial, e uma linha nas Definições com a ação.
-   */
-  autoUpdater.on("update-downloaded", (info) => {
-    if (!isNewerThanInstalled(info?.version)) return;
-    diagLog(`[Update] Downloaded version ${info.version}`);
-    notifyRendererUpdateState("ready", info.version);
-  });
-
-  // Let the UI finish starting before the network request begins.
-  setTimeout(() => {
-    autoUpdater.checkForUpdates().catch((error) => {
-      diagLog(`[Update] Check failed: ${error?.message || error}`);
-    });
-  }, 10_000).unref?.();
-}
 
 app.whenReady().then(async () => {
   if (!gotTheLock) return;
@@ -2764,9 +2465,7 @@ app.whenReady().then(async () => {
    * rejeitado. `setRadialMouseBlocking` e `setRadialTriggerCapture` também o garantem, por isso
    * esta chamada é só aquecimento — nunca a única.
    */
-  ensureRadialMouseBlocker();
-
-  configureAutoUpdates();
+  installOfflinePolicy(session.defaultSession, isDev);
 
   /**
    * Carrega e executa `active-win` durante a inicialização. A primeira carga do
@@ -2799,7 +2498,7 @@ app.whenReady().then(async () => {
   const settingsPath = path.join(app.getPath("userData"), "settings.json");
   let currentSettings = {
     globalShortcut: "Alt+Z",
-    enableMouseTrigger: true,
+    enableMouseTrigger: false,
     mouseTriggerMode: "click",
     mouseTriggerButton: "middle",
     openAtLogin: false,
@@ -2921,6 +2620,9 @@ app.whenReady().then(async () => {
         }
         if (ui.mouseTriggerMode === "click" || ui.mouseTriggerMode === "hold") {
           cachedRadialFlags.mouseTriggerMode = ui.mouseTriggerMode;
+        }
+        if (MOUSE_TRIGGER_BUTTONS.includes(ui.mouseTriggerButton)) {
+          cachedRadialFlags.mouseTriggerButton = ui.mouseTriggerButton;
         }
         mergeGameModeConfig(ui.gameMode);
       }
@@ -3416,33 +3118,6 @@ app.whenReady().then(async () => {
         if (!Array.isArray(normalized.workspaces) && Array.isArray(normalized.config?.workspaces)) {
           normalized.workspaces = normalized.config.workspaces;
         }
-        /**
-         * A licença NÃO vem no backup — e não pode ir-se embora com ele.
-         *
-         * O perfil ativado vive no `user` dentro do `config-v2.json`, e a importação substitui
-         * esse ficheiro inteiro. Um backup feito antes da ativação (ou noutra máquina) traz
-         * `user: null`, e a app pedia a chave outra vez a seguir a restaurar — apesar de o
-         * dispositivo continuar ativado do lado do servidor.
-         *
-         * A ativação é uma propriedade DESTA instalação, não do conteúdo do backup: se já existe
-         * um perfil ativado, ele sobrevive à importação. Um backup que traga um perfil ativado
-         * continua a poder trazê-lo, para quem restaura numa máquina nova.
-         */
-        try {
-          const currentRaw = fs.existsSync(configPath)
-            ? JSON.parse(fs.readFileSync(configPath, "utf-8"))
-            : null;
-          const currentUser = currentRaw && (currentRaw.user || (currentRaw.config && currentRaw.config.user));
-          const importedUser = normalized.user || (normalized.config && normalized.config.user);
-          if (currentUser && currentUser.isPremium === true && !(importedUser && importedUser.isPremium === true)) {
-            normalized.user = currentUser;
-            if (normalized.config) normalized.config.user = currentUser;
-            diagLog("[Import] Licença desta instalação preservada — o backup não trazia perfil ativado");
-          }
-        } catch (e) {
-          diagLog(`[Import] Não foi possível preservar a licença: ${e.message}`);
-        }
-
         const toWrite = JSON.stringify(normalized, null, 2);
         // Escrita atómica idêntica ao saveFullConfigToDisk
         const tempPath = configPath + ".tmp";
@@ -3462,7 +3137,7 @@ app.whenReady().then(async () => {
        *
        * Quando a proveniência não corresponde ao pipeline atual, descartamos os dois: os ícones
        * embutidos na config e o cache. Ficam por resolver, e a cura resolve-os de novo — agora
-       * pelo caminho correto. Favicons de atalhos web são poupados: vêm da net, não do Windows.
+       * pelo caminho correto. Imagens guardadas de atalhos web são poupadas: não vêm do pipeline do Windows.
        */
       const backupIconVersion = data.iconCache && data.iconCache.__pipelineVersion;
       const iconsAreCurrent = backupIconVersion === ICON_PIPELINE_VERSION;
@@ -3706,7 +3381,19 @@ app.whenReady().then(async () => {
     }
     const resizedIcon = trayIcon.resize({ width: 16, height: 16 });
     tray = new Tray(resizedIcon);
+    refreshPauseTray = () => {
     const contextMenu = Menu.buildFromTemplate([
+      { label: pauseReason || "Rovyl is active", enabled: false },
+      { type: "separator" },
+      {
+        label: Date.now() < pauseUntil ? "Resume Rovyl" : "Pause for 30 minutes",
+        click: () => {
+          pauseUntil = Date.now() < pauseUntil ? 0 : Date.now() + 30 * 60 * 1000;
+          pausePolicyVersion += 1;
+          sendMouseContext("CONTEXT 0");
+          void refreshPauseState().then(() => refreshPauseTray());
+        },
+      },
       {
         label: "Open Settings",
         click: async () => {
@@ -3720,8 +3407,14 @@ app.whenReady().then(async () => {
       },
       { label: "Quit", click: () => app.quit() },
     ]);
-    tray.setToolTip("Rovyl");
+    tray.setToolTip(pauseReason ? `Rovyl — ${pauseReason}` : "Rovyl is active");
     tray.setContextMenu(contextMenu);
+    };
+    refreshPauseTray();
+    const pauseMonitor = setInterval(() => void refreshPauseState(), 250);
+    pauseMonitor.unref();
+    app.once('before-quit', () => clearInterval(pauseMonitor));
+    void refreshPauseState();
 
     // Feedback de início
     console.log("Rovyl started successfully in the background.");
@@ -3989,24 +3682,6 @@ app.whenReady().then(async () => {
     }
   });
 
-  ipcMain.handle("open-external-url", async (event, url) => {
-    if (typeof url !== "string") {
-      return { ok: false, error: "Invalid URL" };
-    }
-    const trimmed = url.trim();
-    if (!/^https?:\/\//i.test(trimmed)) {
-      return { ok: false, error: "Only http(s) URLs are allowed" };
-    }
-    try {
-      await shell.openExternal(trimmed);
-      return { ok: true };
-    } catch (e) {
-      diagLog(`[open-external-url] ${e.message}`);
-      return { ok: false, error: e.message };
-    }
-  });
-
-  /** Windows: run NSIS uninstaller from registry, or open Apps settings; dev → Apps; macOS: reveal .app in Finder. */
   ipcMain.handle("open-system-uninstall", async () => {
     const displayName = "Rovyl";
     try {
@@ -4096,527 +3771,6 @@ app.whenReady().then(async () => {
   ipcMain.on("stop-shortcut-recording", () => {
     diagLog("[Shortcuts] Stopping global recording session.");
     stopShortcutRecording();
-  });
-
-  /** Verify Google ID token (Sign in with Google / zenithos.online auth page). */
-  function verifyGoogleIdToken(idToken) {
-    return new Promise((resolve, reject) => {
-      const u = `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`;
-      https
-        .get(u, (tokenRes) => {
-          let body = "";
-          tokenRes.on("data", (d) => {
-            body += d;
-          });
-          tokenRes.on("end", () => {
-            try {
-              const data = JSON.parse(body);
-              if (data.error) {
-                reject(new Error(data.error_description || String(data.error)));
-                return;
-              }
-              resolve(data);
-            } catch (e) {
-              reject(e);
-            }
-          });
-        })
-        .on("error", reject);
-    });
-  }
-
-  /**
-   * Impressão digital ESTÁVEL da máquina.
-   *
-   * O `MachineGuid` é escrito pelo Windows na instalação do sistema e não muda com reinstalações
-   * de aplicações, limpezas de perfil nem atualizações. O UUID do hardware serve de alternativa
-   * quando o registo não é legível. Só se cai no aleatório se ambos falharem — e aí volta a valer
-   * o ficheiro em disco.
-   */
-  function readStableMachineId() {
-    if (process.platform !== "win32") return null;
-    const attempts = [
-      () =>
-        execFileSync(
-          "reg",
-          ["query", "HKLM\\SOFTWARE\\Microsoft\\Cryptography", "/v", "MachineGuid"],
-          { encoding: "utf8", windowsHide: true, timeout: 4000 },
-        ),
-      () =>
-        execFileSync(
-          "wmic",
-          ["csproduct", "get", "uuid"],
-          { encoding: "utf8", windowsHide: true, timeout: 4000 },
-        ),
-    ];
-    for (const attempt of attempts) {
-      try {
-        const output = attempt();
-        const match = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(output);
-        if (match) return match[0].toLowerCase();
-      } catch (e) {
-        /* tenta o seguinte */
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Identificador do dispositivo para o servidor de licenças.
-   *
-   * Era um valor ALEATÓRIO guardado na pasta de dados da app. Qualquer coisa que apagasse essa
-   * pasta — reinstalar, limpar o perfil, testar com `--user-data-dir` — produzia um identificador
-   * novo, e o servidor contava a MESMA máquina como mais um dispositivo. Três ativações no mesmo
-   * computador esgotavam o limite de três.
-   *
-   * Agora deriva-se do `MachineGuid` do Windows: o mesmo computador devolve sempre o mesmo
-   * identificador, haja ou não pasta de dados. O ficheiro passa a ser só cache.
-   */
-  function getOrCreateLicenseDeviceId() {
-    const devicePath = path.join(app.getPath("userData"), "license-device.json");
-    const machineId = readStableMachineId();
-
-    if (machineId) {
-      const deviceId = crypto
-        .createHash("sha256")
-        .update(`rovyl:${machineId}`)
-        .digest("hex");
-      try {
-        const saved = JSON.parse(fs.readFileSync(devicePath, "utf8"));
-        if (saved.deviceId !== deviceId) {
-          diagLog("[License] deviceId migrado para a impressão digital estável da máquina");
-        }
-      } catch (e) {
-        /* ficheiro ausente ou ilegível — escrever de novo */
-      }
-      try {
-        fs.writeFileSync(devicePath, JSON.stringify({ deviceId, source: "machine-guid" }), {
-          encoding: "utf8",
-          mode: 0o600,
-        });
-      } catch (e) {
-        /* o identificador é derivável na mesma; o ficheiro é só cache */
-      }
-      return deviceId;
-    }
-
-    /** Sem identificador de máquina: comportamento antigo, com o ficheiro a mandar. */
-    try {
-      const saved = JSON.parse(fs.readFileSync(devicePath, "utf8"));
-      if (typeof saved.deviceId === "string" && saved.deviceId.length >= 32) return saved.deviceId;
-    } catch (_) {}
-    const deviceId = crypto.randomUUID() + crypto.randomBytes(24).toString("hex");
-    fs.writeFileSync(devicePath, JSON.stringify({ deviceId }), { encoding: "utf8", mode: 0o600 });
-    return deviceId;
-  }
-
-  async function activateRovylLicense(idToken) {
-    const endpoint = process.env.ROVYL_LICENSE_API_URL || "https://rovyl-red.vercel.app/api/license/activate";
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "User-Agent": `Rovyl/${app.getVersion()}` },
-      body: JSON.stringify({
-        idToken,
-        deviceId: getOrCreateLicenseDeviceId(),
-        deviceName: `${os.hostname()} · ${os.platform()} ${os.release()}`,
-      }),
-    });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok || result.licensed !== true) {
-      const error = new Error(result.error || "Rovyl purchase could not be verified.");
-      error.code = result.code || "LICENSE_DENIED";
-      throw error;
-    }
-    return result;
-  }
-
-  async function activateRovylLicenseKey(licenseKey) {
-    const endpoint = process.env.ROVYL_LICENSE_KEY_API_URL || "https://rovyl-red.vercel.app/api/license/activate-key";
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "User-Agent": `Rovyl/${app.getVersion()}` },
-      body: JSON.stringify({
-        licenseKey,
-        deviceId: getOrCreateLicenseDeviceId(),
-        deviceName: `${os.hostname()} · ${os.platform()} ${os.release()}`,
-      }),
-    });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok || result.licensed !== true) {
-      const error = new Error(result.error || "This Rovyl license could not be activated.");
-      error.code = result.code || "LICENSE_DENIED";
-      throw error;
-    }
-    return result;
-  }
-
-  /**
-   * Libertar o lugar do dispositivo no servidor.
-   *
-   * Sem isto, "Remove license" só apagava o perfil local: o lugar continuava ocupado e o
-   * utilizador ficava sem forma de o reaver — foi assim que se esgotaram três lugares numa só
-   * máquina. A chamada é tolerante por desenho: se a rota ainda não existir, ou a rede falhar,
-   * devolve o motivo e a app remove a licença localmente na mesma, para nunca ficar presa.
-   */
-  async function deactivateRovylLicenseDevice() {
-    const endpoint =
-      process.env.ROVYL_LICENSE_DEACTIVATE_API_URL ||
-      "https://rovyl-red.vercel.app/api/license/deactivate";
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "User-Agent": `Rovyl/${app.getVersion()}` },
-      body: JSON.stringify({ deviceId: getOrCreateLicenseDeviceId() }),
-    });
-    if (response.status === 404) {
-      const error = new Error("O serviço de licenças ainda não expõe desativação.");
-      error.code = "DEACTIVATE_UNAVAILABLE";
-      throw error;
-    }
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const error = new Error(result.error || "Não foi possível libertar este dispositivo.");
-      error.code = result.code || "DEACTIVATE_FAILED";
-      throw error;
-    }
-    return result;
-  }
-
-  ipcMain.handle("deactivate-rovyl-license", async () => {
-    try {
-      const result = await deactivateRovylLicenseDevice();
-      diagLog("[License] Dispositivo libertado no servidor");
-      return { ok: true, result };
-    } catch (error) {
-      diagLog(`[License] Desativação remota falhou: ${error?.message}`);
-      return {
-        ok: false,
-        error: error?.message || "Não foi possível libertar este dispositivo.",
-        code: error?.code || "DEACTIVATE_FAILED",
-      };
-    }
-  });
-
-  /**
-   * Chave de desenvolvimento — ativação local, sem servidor e sem gastar dispositivos.
-   *
-   * No binário fica só o SHA-256; a chave em si nunca é escrita no código, portanto quem
-   * desmontar o executável encontra um hash e não uma chave. Continua a ser uma porta: quem a
-   * souber ativa qualquer instalação. Trata-a como uma credencial — não a metas em capturas de
-   * ecrã, commits ou vídeos.
-   */
-  const DEV_LICENSE_KEY_SHA256 =
-    "b94dc0c453f99b63185c20e3fa538c7d89528328a5cf30fa92dd5fe358510972";
-
-  function isDevLicenseKey(licenseKey) {
-    if (typeof licenseKey !== "string" || !licenseKey.trim()) return false;
-    const digest = crypto
-      .createHash("sha256")
-      .update(licenseKey.trim().toUpperCase())
-      .digest("hex");
-    /** Comparação em tempo constante: uma comparação normal vaza o prefixo por temporização. */
-    const a = Buffer.from(digest, "hex");
-    const b = Buffer.from(DEV_LICENSE_KEY_SHA256, "hex");
-    return a.length === b.length && crypto.timingSafeEqual(a, b);
-  }
-
-  ipcMain.handle("activate-rovyl-license", async (_event, licenseKey) => {
-    if (isDevLicenseKey(licenseKey)) {
-      diagLog("[License] Chave de desenvolvimento aceite — ativação local, sem servidor");
-      return {
-        ok: true,
-        license: {
-          name: "Rovyl Dev",
-          email: "dev@rovyl.app",
-          isPremium: true,
-          isAdmin: true,
-          planTier: "pro",
-        },
-      };
-    }
-
-    try {
-      const license = await activateRovylLicenseKey(licenseKey);
-      return { ok: true, license };
-    } catch (error) {
-      return { ok: false, error: error?.message || "Could not activate this license.", code: error?.code || "LICENSE_DENIED" };
-    }
-  });
-
-  function emitGoogleAuthSuccess(license) {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("google-auth-success", {
-        email: license.email,
-        name: license.name,
-        avatarUrl: license.avatarUrl,
-        isAdmin: license.isAdmin === true,
-        isPremium: true,
-        planTier: "pro",
-      });
-      mainWindow.show();
-      mainWindow.focus();
-    }
-  }
-
-  function sendZenithAuthSuccessHtml(res) {
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(`<!DOCTYPE html>
-<html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Rovyl — signed in</title>
-<style>
-  *{box-sizing:border-box}
-  body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#0a0a0a;color:#e8e8e8;-webkit-font-smoothing:antialiased}
-  .glow{pointer-events:none;position:fixed;inset:0;overflow:hidden}
-  .glow::before{content:"";position:absolute;top:18%;left:50%;transform:translateX(-50%);width:min(92vw,520px);height:300px;border-radius:50%;background:radial-gradient(ellipse at center,hsla(265,45%,50%,.14) 0%,transparent 70%);filter:blur(48px)}
-  .glow::after{content:"";position:absolute;bottom:8%;right:0;width:min(80vw,380px);height:220px;border-radius:50%;background:radial-gradient(ellipse at center,hsla(200,50%,45%,.08) 0%,transparent 72%);filter:blur(40px)}
-  .card{position:relative;text-align:center;max-width:420px;margin:0 16px;padding:2px;border-radius:18px;background:linear-gradient(135deg,rgba(139,92,246,.45),rgba(217,70,239,.4),rgba(56,189,248,.42));box-shadow:0 24px 80px -32px rgba(0,0,0,.75),inset 0 1px 0 rgba(255,255,255,.08)}
-  .card-inner{border-radius:16px;background:linear-gradient(180deg,hsla(265,50%,50%,.09),hsla(200,50%,45%,.05) 60%,hsla(0,0%,7%,.96));border:1px solid rgba(255,255,255,.08);padding:0 28px 30px;backdrop-filter:blur(12px)}
-  .strip{height:3px;border-radius:16px 16px 0 0;margin:0 0 22px;background:linear-gradient(90deg,rgba(139,92,246,.85),rgba(217,70,239,.78),rgba(56,189,248,.75))}
-  .icon-wrap{display:inline-flex;align-items:center;justify-content:center;width:76px;height:76px;border-radius:50%;margin:0 auto 18px;padding:2px;background:linear-gradient(135deg,rgba(139,92,246,.55),rgba(217,70,239,.5),rgba(56,189,248,.5));box-shadow:0 0 0 1px rgba(255,255,255,.08)}
-  .icon-in{display:flex;align-items:center;justify-content:center;width:100%;height:100%;border-radius:50%;background:hsla(0,0%,7%,.96);border:1px solid rgba(255,255,255,.1)}
-  .icon-in svg{width:40px;height:40px;stroke:#7dd3fc;stroke-width:1.35;fill:none;filter:drop-shadow(0 0 12px hsla(199,85%,58%,.35))}
-  h1{font-size:1.35rem;font-weight:600;margin:0 0 10px;letter-spacing:-.03em;background:linear-gradient(90deg,#e9d5ff,#f5d0fe,#bae6fd);-webkit-background-clip:text;background-clip:text;color:transparent}
-  p{font-size:14px;line-height:1.55;margin:0;opacity:.88}
-  p.sub{margin-top:12px;font-size:13px;opacity:.65;line-height:1.45}
-</style></head>
-<body>
-  <div class="glow" aria-hidden="true"></div>
-  <div class="card">
-    <div class="card-inner">
-      <div class="strip" aria-hidden="true"></div>
-      <div class="icon-wrap" aria-hidden="true"><div class="icon-in"><svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></div></div>
-      <h1>Signed in to Rovyl</h1>
-      <p>This page finished linking your account. Return to the Rovyl window &mdash; it should already be signed in.</p>
-      <p class="sub">You can close this tab.</p>
-    </div>
-  </div>
-</body></html>`);
-  }
-
-  // GOOGLE AUTH: browser opens zenithos.online/auth; site redirects here with id_token (or legacy OAuth /callback).
-  let authServer = null;
-  ipcMain.on("start-google-auth", () => {
-    if (authServer) {
-      try {
-        authServer.close();
-      } catch (e) {}
-    }
-
-    const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
-    const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-    /**
-     * Sem valor por omissao: o ID identifica o projeto Google Cloud de quem publica, e num
-     * repositorio publico uma bifurcacao herdaria silenciosamente o projeto do autor.
-     * Quem compila define o seu em `.env.local` — ver `.env.example`.
-     */
-    const GOOGLE_WEB_CLIENT_ID = process.env.GOOGLE_WEB_CLIENT_ID;
-    const allowedAuds = [GOOGLE_WEB_CLIENT_ID, GOOGLE_CLIENT_ID].filter(Boolean);
-
-    if (allowedAuds.length === 0) {
-      let userDataHint = "";
-      try {
-        userDataHint = app.getPath("userData");
-      } catch (_) {}
-      diagLog(
-        "[Auth] Missing GOOGLE_CLIENT_ID or GOOGLE_WEB_CLIENT_ID (need at least one for web sign-in)."
-      );
-      const msg =
-        "Google sign-in needs an OAuth client ID. Add GOOGLE_WEB_CLIENT_ID (same as the website / VITE_GOOGLE_CLIENT_ID) or GOOGLE_CLIENT_ID to .env.local in:\n\n" +
-        (userDataHint || "AppData") +
-        "\n\nThen restart Rovyl.";
-      dialog.showErrorBox("Rovyl — Google sign-in", msg);
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("google-auth-error", {
-          code: "MISSING_OAUTH_CONFIG",
-          userDataPath: userDataHint,
-        });
-      }
-      return;
-    }
-
-    diagLog("[Auth] Starting local auth bridge (web sign-in → localhost)...");
-
-    const REDIRECT_URI = "http://localhost:3892/callback";
-
-    authServer = http.createServer((req, res) => {
-      const parsedUrl = url.parse(req.url, true);
-      const pathname = parsedUrl.pathname || "";
-
-      if (pathname === "/ping") {
-        res.writeHead(200, { "Content-Type": "text/plain" });
-        res.end("ok");
-        return;
-      }
-
-      if (pathname === "/desktop-complete") {
-        const idToken = parsedUrl.query.id_token;
-        if (!idToken || typeof idToken !== "string") {
-          res.writeHead(400, { "Content-Type": "text/plain" });
-          res.end("Missing id_token.");
-          return;
-        }
-        verifyGoogleIdToken(idToken)
-          .then(async (data) => {
-            if (!allowedAuds.includes(data.aud)) {
-              diagLog(`[Auth] id_token aud rejected: ${data.aud}`);
-              res.writeHead(400, { "Content-Type": "text/plain" });
-              res.end("Invalid sign-in token (audience). Use the same Google OAuth client as the app.");
-              return;
-            }
-            const email = data.email;
-            const name = data.name || (email ? String(email).split("@")[0] : "User");
-            const picture = data.picture;
-            diagLog(`[Auth] Web id_token OK: ${email}`);
-            const license = await activateRovylLicense(idToken);
-            emitGoogleAuthSuccess({ ...license, name: license.name || name, avatarUrl: license.avatarUrl || picture });
-            sendZenithAuthSuccessHtml(res);
-            if (authServer) {
-              try {
-                authServer.close();
-              } catch (e) {}
-              authServer = null;
-            }
-          })
-          .catch((e) => {
-            diagLog(`[Auth] Sign-in/license failed (${e.code || "AUTH_ERROR"}): ${e.message}`);
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.webContents.send("google-auth-error", { code: e.code || "LICENSE_DENIED", message: e.message });
-            }
-            dialog.showErrorBox("Rovyl — license required", e.message);
-            res.writeHead(e.code === "PURCHASE_REQUIRED" ? 403 : 400, { "Content-Type": "text/plain; charset=utf-8" });
-            res.end(e.code === "PURCHASE_REQUIRED" ? "No Rovyl purchase was found for this Google account." : "Could not verify your Rovyl license.");
-          });
-        return;
-      }
-
-      if (pathname === "/callback") {
-        if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
-          res.writeHead(400, { "Content-Type": "text/plain" });
-          res.end("Legacy OAuth redirect is not configured (missing client secret). Use the website sign-in flow.");
-          return;
-        }
-        const { code } = parsedUrl.query;
-        if (!code) {
-            res.end("Error: No code received.");
-            return;
-        }
-
-        diagLog(`[Auth] Received code, exchanging for tokens...`);
-        
-        // Exchange code for tokens
-        const postData = new URLSearchParams({
-            code,
-            client_id: GOOGLE_CLIENT_ID,
-            client_secret: GOOGLE_CLIENT_SECRET,
-            redirect_uri: REDIRECT_URI,
-            grant_type: 'authorization_code'
-        }).toString();
-
-        const options = {
-            hostname: 'oauth2.googleapis.com',
-            port: 443,
-            path: '/token',
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Content-Length': postData.length
-            }
-        };
-
-        const tokenReq = https.request(options, (tokenRes) => {
-            let body = '';
-            tokenRes.on('data', (d) => body += d);
-            tokenRes.on('end', () => {
-                let tokenData;
-                try {
-                    tokenData = JSON.parse(body);
-                } catch (e) {
-                    diagLog("[Auth] Error parsing token response: " + body);
-                    res.end("Authentication failed.");
-                    return;
-                }
-
-                if (tokenData.access_token && tokenData.id_token) {
-                    diagLog("[Auth] Access token received, fetching user info...");
-                    
-                    // Fetch user info
-                    https.get(`https://www.googleapis.com/oauth2/v3/userinfo?access_token=${tokenData.access_token}`, (userRes) => {
-                        let userBody = '';
-                        userRes.on('data', (d) => userBody += d);
-                        userRes.on('end', async () => {
-                            const userInfo = JSON.parse(userBody);
-                            const { email, name, picture } = userInfo;
-                            
-                            diagLog(`[Auth] Successfully authenticated as ${email}`);
-                            try {
-                              const license = await activateRovylLicense(tokenData.id_token);
-                              emitGoogleAuthSuccess({ ...license, name: license.name || name, avatarUrl: license.avatarUrl || picture });
-                              sendZenithAuthSuccessHtml(res);
-                            } catch (e) {
-                              diagLog(`[Auth] Legacy license failed (${e.code || "LICENSE_DENIED"}): ${e.message}`);
-                              dialog.showErrorBox("Rovyl — license required", e.message);
-                              res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8" });
-                              res.end("No active Rovyl license was found for this account.");
-                            }
-                            
-                            if (authServer) {
-                                authServer.close();
-                                authServer = null;
-                            }
-                        });
-                    });
-                } else {
-                    diagLog("[Auth] Error: Failed to exchange code for an ID token: " + body);
-                    res.end("Authentication failed.");
-                }
-            });
-        });
-
-        tokenReq.on('error', (e) => {
-            diagLog("[Auth] Request error: " + e.message);
-            res.end("Network error.");
-        });
-
-        tokenReq.write(postData);
-        tokenReq.end();
-
-      } else {
-        res.writeHead(404);
-        res.end();
-      }
-    });
-
-    authServer.on("error", (err) => {
-      diagLog(`[Auth] HTTP server error: ${err.code || ""} ${err.message}`);
-      const detail =
-        err.code === "EADDRINUSE"
-          ? "Port 3892 is already in use. Close another Rovyl instance or any app using that port, then try again."
-          : err.message;
-      dialog.showErrorBox("Rovyl — Google sign-in", detail);
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send("google-auth-error", {
-          code: err.code,
-          message: err.message,
-        });
-      }
-      authServer = null;
-    });
-
-    authServer.listen(3892, () => {
-      diagLog("[Auth] Local callback server listening on port 3892");
-      const base =
-        process.env.ZENITH_WEB_AUTH_URL || "https://rovyl-red.vercel.app/auth";
-      const sep = base.includes("?") ? "&" : "?";
-      const webAuthUrl = `${base}${sep}client=desktop`;
-      diagLog(`[Auth] Opening browser (web sign-in): ${webAuthUrl}`);
-      shell.openExternal(webAuthUrl);
-    });
-
-    setTimeout(() => {
-        if (authServer) {
-            authServer.close();
-            authServer = null;
-            diagLog("[Auth] Server timed out after 5 minutes");
-        }
-    }, 5 * 60 * 1000);
   });
 
   ipcMain.on("set-workspace-shortcuts", (event, isOpen, mode) => {
@@ -5795,7 +4949,7 @@ ipcMain.on("hide-window", () => {
     try {
       mainWindow.setIgnoreMouseEvents(true);
       applySmallModeCollapsedBounds(undefined);
-      if (!mainWindow.isVisible()) mainWindow.showInactive();
+      mainWindow.hide();
       mainWindow.webContents.setBackgroundThrottling(true);
     } catch (e) {
       /* ignore */
@@ -5937,46 +5091,6 @@ ipcMain.handle("was-opened-at-login", () => {
 
 ipcMain.handle("get-app-version", () => app.getVersion());
 
-/**
- * O renderer esconde as linhas de atualização quando a app veio da Store — deixar lá um botão
- * "Check now" que devolve sempre erro é pior do que não ter botão nenhum.
- */
-ipcMain.handle("get-build-channel", () => (isStoreBuild() ? "store" : "direct"));
-
-/** Estado atual, para o painel se pintar mesmo que tenha aberto depois do evento. */
-ipcMain.handle("get-update-state", () => lastKnownUpdate);
-
-/**
- * Verificação a pedido. O arranque já verifica sozinho passados 10 s; isto é para quem quer
- * confirmar agora — e para dar uma resposta visível a quem carrega no botão.
- */
-ipcMain.handle("check-for-updates", async () => {
-  if (!app.isPackaged || process.platform !== "win32") {
-    return { ok: false, code: "UNSUPPORTED", state: lastKnownUpdate.state };
-  }
-  /** Na Store o botão nem aparece; o guarda fica para o caso de alguém chamar o canal à mão. */
-  if (isStoreBuild()) {
-    return { ok: false, code: "STORE_BUILD", state: "idle" };
-  }
-  try {
-    const result = await autoUpdater.checkForUpdates();
-    const version = result?.updateInfo?.version;
-    if (isNewerThanInstalled(version)) {
-      return { ok: true, state: "downloading", version };
-    }
-    return { ok: true, state: "current", version: app.getVersion() };
-  } catch (error) {
-    diagLog(`[Update] Manual check failed: ${error?.message || error}`);
-    return { ok: false, code: "CHECK_FAILED", error: error?.message || String(error) };
-  }
-});
-
-/** Reinício para instalar — o utilizador escolhe o momento, na linha das Definições. */
-ipcMain.on("install-update-now", () => {
-  diagLog("[Update] Install requested by the user");
-  beginUpdateInstall();
-});
-
 ipcMain.on("request-keyboard-focus", () => {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   /** Antes do reveal a janela ainda está oculta; o renderer volta a pedir a seguir. */
@@ -6076,44 +5190,6 @@ ipcMain.on("set-window-opacity", (event, opacity) => {
 });
 
 
-ipcMain.handle("get-onboarding-apps", async () => {
-  return new Promise((resolve) => {
-    const targetApps = ["Chrome", "Edge", "Discord", "Spotify", "Steam", "VS Code", "Visual Studio Code", "Notepad", "Calculadora", "Calculator"];
-    const psScriptContent = `
-      $ErrorActionPreference = 'SilentlyContinue'
-      $targets = @(${targetApps.map((a) => `'${a}'`).join(", ")})
-      $apps = Get-StartApps | Where-Object {
-        $name = $_.Name
-        $match = $targets | Where-Object { $name -like "*$_*" }
-        $match -and ($_.AppID -notmatch 'Help|Feedback|Contact|Support|Manual|Desinstalar|Ajuda')
-      } | Select-Object Name, AppID | Select-Object -First 5
-
-      $results = @()
-      foreach ($app in $apps) {
-        $results += [PSCustomObject]@{
-          Name = [string]$app.Name
-          Path = [string]$app.AppID
-        }
-      }
-      $results | ConvertTo-Json -Compress
-    `;
-
-    const tempPath = path.join(app.getPath("userData"), "temp-onboarding.ps1");
-    try {
-      fs.writeFileSync(tempPath, psScriptContent, "utf8");
-      exec(`powershell -NoProfile -ExecutionPolicy RemoteSigned -File "${tempPath}"`, (error, stdout) => {
-        try { fs.unlinkSync(tempPath); } catch (e) {}
-        if (error || !stdout) { resolve([]); return; }
-        try {
-          const apps = JSON.parse(stdout);
-          resolve(Array.isArray(apps) ? apps : [apps]);
-        } catch (e) { resolve([]); }
-      });
-    } catch (e) { resolve([]); }
-  });
-});
-
-// IPC: Get recommended apps for initial workspace (Discovery)
 ipcMain.handle("get-startup-apps", async () => {
   return new Promise((resolve) => {
     diagLog("[Discovery] Running Smart Discovery for initial apps...");
@@ -6284,7 +5360,7 @@ ipcMain.handle("collapse-idle-overlay", () => {
   try {
     mainWindow.setIgnoreMouseEvents(true);
     mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-    if (!mainWindow.isVisible()) mainWindow.showInactive();
+    mainWindow.hide();
     mainWindow.webContents.setBackgroundThrottling(true);
   } catch (e) {
     /* ignore */
@@ -6323,7 +5399,7 @@ ipcMain.handle("reapply-small-overlay", () => {
     mainWindow.setIgnoreMouseEvents(true);
     applySmallModeCollapsedBounds(undefined);
     mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-    if (!mainWindow.isVisible()) mainWindow.showInactive();
+    mainWindow.hide();
     mainWindow.webContents.setBackgroundThrottling(true);
   } catch (e) {
     /* ignore */
@@ -6376,7 +5452,7 @@ ipcMain.handle("set-window-hit-shape", (event, rects, opts = {}) => {
               if (nativeWindowSizeMode !== "small") return;
               mainWindow.setIgnoreMouseEvents(true);
               applySmallModeCollapsedBounds(undefined);
-              if (!mainWindow.isVisible()) mainWindow.showInactive();
+              mainWindow.hide();
             } catch (e) {
               /* ignore */
             }
@@ -6495,6 +5571,7 @@ ipcMain.on("quit-app", () => {
       fs.unlinkSync(configPath);
       diagLog("[Reset] Deleted config-v2.json");
     }
+    if (fs.existsSync(`${configPath}.bak`)) fs.unlinkSync(`${configPath}.bak`);
     if (fs.existsSync(oldConfigPath)) {
       fs.unlinkSync(oldConfigPath);
       diagLog("[Reset] Deleted config.json");
@@ -6511,22 +5588,7 @@ ipcMain.on("quit-app", () => {
       diagLog("[Reset] Deleted icon-cache.json");
     }
 
-    // Clear both pre-rebrand profiles so a factory reset cannot migrate stale data back.
-    try {
-      const appData = app.getPath("appData");
-      for (const legacyName of ["Zenith OS", "zenith-radial-menu"]) {
-        const legacyDir = path.join(appData, legacyName);
-        for (const f of ["config-v2.json", "config-v2.json.bak", "settings.json"]) {
-          const legacy = path.join(legacyDir, f);
-          if (fs.existsSync(legacy)) {
-            fs.unlinkSync(legacy);
-            diagLog(`[Reset] Deleted legacy ${f} from ${legacyName}`);
-          }
-        }
-      }
-    } catch (le) {
-      diagLog(`[Reset] Legacy cleanup error (non-fatal): ${le.message}`);
-    }
+    // Keep the migration marker and leave the original app profiles untouched.
 
     // Clear Electron session storage (Local Storage, IndexedDB, Cache, etc.)
     const { session } = require('electron');
@@ -6780,147 +5842,6 @@ const saveIconCache = ({ sync = false } = {}) => {
     diagLog(`[IconCache] Failed to save icon cache: ${e.message}`);
   }
 };
-
-/** In-memory favicon data URLs — hostname lowercased */
-const faviconDataUrlCache = new Map();
-const FAVICON_CACHE_MAX_ENTRIES = 128;
-
-const rememberFavicon = (hostname, dataUrl) => {
-  faviconDataUrlCache.delete(hostname);
-  faviconDataUrlCache.set(hostname, dataUrl);
-  while (faviconDataUrlCache.size > FAVICON_CACHE_MAX_ENTRIES) {
-    const oldest = faviconDataUrlCache.keys().next().value;
-    if (!oldest) break;
-    faviconDataUrlCache.delete(oldest);
-  }
-};
-
-function sniffImageMimeFromBuffer(buf) {
-  if (!buf || buf.length < 4) return "image/png";
-  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47)
-    return "image/png";
-  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
-  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return "image/gif";
-  if (
-    buf[0] === 0x00 &&
-    buf[1] === 0x00 &&
-    buf[2] === 0x01 &&
-    buf[3] === 0x00
-  )
-    return "image/x-icon";
-  if (
-    buf[0] === 0x00 &&
-    buf[1] === 0x00 &&
-    buf[2] === 0x02 &&
-    buf[3] === 0x00
-  )
-    return "image/x-icon";
-  return "image/png";
-}
-
-function fetchUrlBodyBuffer(targetUrl, maxBytes = 524288, redirectDepth = 0) {
-  return new Promise((resolve) => {
-    if (redirectDepth > 8) return resolve(null);
-    let lib;
-    try {
-      const u = new URL(targetUrl);
-      lib = u.protocol === "http:" ? http : https;
-    } catch {
-      return resolve(null);
-    }
-    const req = lib.get(
-      targetUrl,
-      {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (compatible; Rovyl/1.0; +https://github.com)",
-          Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        },
-        timeout: 12000,
-      },
-      (res) => {
-        if (
-          res.statusCode >= 300 &&
-          res.statusCode < 400 &&
-          res.headers.location
-        ) {
-          let next;
-          try {
-            next = new URL(res.headers.location, targetUrl).href;
-          } catch {
-            res.resume();
-            return resolve(null);
-          }
-          res.resume();
-          fetchUrlBodyBuffer(next, maxBytes, redirectDepth + 1).then(resolve);
-          return;
-        }
-        if (res.statusCode !== 200) {
-          res.resume();
-          return resolve(null);
-        }
-        const chunks = [];
-        let len = 0;
-        res.on("data", (d) => {
-          len += d.length;
-          if (len > maxBytes) {
-            req.destroy();
-            resolve(null);
-          } else chunks.push(d);
-        });
-        res.on("end", () => {
-          if (!chunks.length) resolve(null);
-          else resolve(Buffer.concat(chunks));
-        });
-      },
-    );
-    req.on("error", () => resolve(null));
-    req.on("timeout", () => {
-      req.destroy();
-      resolve(null);
-    });
-  });
-}
-
-/** Evita <img src=https://…> no renderer (muitas vezes bloqueado); devolve data URL. */
-ipcMain.handle("get-website-favicon-data-url", async (_event, pageUrl) => {
-  try {
-    let hostname;
-    try {
-      let s = String(pageUrl || "").trim();
-      if (!s) return null;
-      if (!/^https?:\/\//i.test(s)) s = `https://${s}`;
-      hostname = new URL(s).hostname;
-    } catch {
-      return null;
-    }
-    if (!hostname) return null;
-    const hostKey = hostname.toLowerCase();
-    if (faviconDataUrlCache.has(hostKey)) {
-      return faviconDataUrlCache.get(hostKey);
-    }
-
-    const candidates = [
-      `https://www.google.com/s2/favicons?domain=${encodeURIComponent(hostname)}&sz=128`,
-      `https://icons.duckduckgo.com/ip3/${encodeURIComponent(hostname)}.ico`,
-    ];
-
-    for (const u of candidates) {
-      const buf = await fetchUrlBodyBuffer(u);
-      if (!buf || buf.length < 16) continue;
-      const mime = sniffImageMimeFromBuffer(buf);
-      const dataUrl = `data:${mime};base64,${buf.toString("base64")}`;
-      rememberFavicon(hostKey, dataUrl);
-      diagLog(`[Favicon] ${hostname} ok (${mime}, ${buf.length}b)`);
-      return dataUrl;
-    }
-    diagLog(`[Favicon] no image for ${hostname}`);
-    return null;
-  } catch (e) {
-    diagLog(`[Favicon] error: ${e.message}`);
-    return null;
-  }
-});
 
 // Each extraction is its own PowerShell process (~1.3s, mostly Add-Type
 // compiling the interop shim). A picker showing dozens of rows would otherwise

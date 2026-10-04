@@ -12,6 +12,7 @@ node_modules.onedrive-*/
 dist
 dist-ssr
 *.local
+.env
 
 # Build outputs
 build/icon.ico
@@ -53,4 +54,3 @@ backend/debug_*.json
 
 # Local build verification runs
 build-out-update-validation/
-build/appx/

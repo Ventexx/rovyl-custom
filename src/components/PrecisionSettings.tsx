@@ -20,6 +20,7 @@ import {
   Pencil,
   Plus,
   Search,
+  RotateCcw,
   Palette,
   Settings,
   Shield,
@@ -30,12 +31,16 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import type { AppItem, UIConfig, Workspace } from '../types';
 import { getIcon } from '../iconMap';
-import { resolveWebsiteIconFields } from '../siteFavicon';
+import { WHEEL_DEFAULTS, wheelAppearance } from '../utils/wheelAppearance';
+import { websiteIconFields } from '../localIcons';
 import { SmartIcon } from './SmartIcon';
 import { IconPicker } from './IconPicker';
 import { NativeAppIcon, useInstalledApps, type InstalledApp } from './installedApps';
 
 interface PrecisionSettingsProps {
+  saveStatus: 'saving' | 'saved' | 'error';
+  isTestingWorkspace: boolean;
+  onTestWorkspace: (workspace: Workspace) => void;
   isOpen: boolean;
   onClose: () => void;
   apps: AppItem[];
@@ -44,9 +49,6 @@ interface PrecisionSettingsProps {
   setConfig: (value: UIConfig | ((prev: UIConfig) => UIConfig)) => void;
   onReset: () => void;
   onOpenDashboard: () => void;
-  /** Estado da licença ativa nesta máquina — a linha das definições espelha-o. */
-  /** Verdadeiro enquanto houver um pedido pendente para abrir o cartão da licença. */
-  /** Chamado assim que o pedido é atendido, para o App o limpar. */
   isPage?: boolean;
 }
 
@@ -79,6 +81,7 @@ interface SettingItem {
   onChange?: (value: number | string) => void;
   onOpen?: () => void;
   onRun?: () => void;
+  onResetValue?: () => void;
   actionLabel?: string;
   actionIcon?: LucideIcon;
   /** Optional destructive shortcut shown beside the regular row control. */
@@ -98,7 +101,7 @@ interface SettingItem {
 const SECTIONS: Array<{ id: SectionId; label: string; caption: string; icon: LucideIcon }> = [
   { id: 'general', label: 'General', caption: 'Core Rovyl behavior.', icon: Settings },
   { id: 'trigger', label: 'Activation', caption: 'How and where the wheel appears.', icon: Mouse },
-  { id: 'appearance', label: 'Appearance', caption: 'Shape, presence, and theme.', icon: Palette },
+  { id: 'appearance', label: 'Appearance', caption: 'Wheel layout, names, transparency, and theme. Changes apply the next time you open the wheel.', icon: Palette },
   { id: 'spaces', label: 'Workspaces', caption: 'Contexts and their shortcuts.', icon: SquareStack },
   { id: 'advanced', label: 'Advanced', caption: 'Performance, protection, and data.', icon: Shield },
 ];
@@ -110,6 +113,9 @@ export const PrecisionSettings: React.FC<PrecisionSettingsProps> = ({
   config,
   setConfig,
   onReset,
+  saveStatus,
+  isTestingWorkspace,
+  onTestWorkspace,
 }) => {
   const [sectionId, setSectionId] = useState<SectionId>('general');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -118,72 +124,13 @@ export const PrecisionSettings: React.FC<PrecisionSettingsProps> = ({
   const [toast, setToast] = useState<string | null>(null);
   /** Versão do executável (não existe fora do Electron — o rodapé fica só com o nome). */
   const [appVersion, setAppVersion] = useState<string | null>(null);
-  /** Ativou a licença: o conteúdo sai em fade antes de a janela fechar. */
+  /** Fade out before closing the settings panel. */
   const [isDismissing, setIsDismissing] = useState(false);
-  /**
-   * Atualização: o painel é agora o único sítio com a AÇÃO — a caixa nativa do Windows foi
-   * removida. O selo no hub do radial avisa; aqui decide-se o quê e o quando.
-   */
-  const [updateInfo, setUpdateInfo] = useState<{ state: string; version?: string | null }>({ state: 'idle' });
-  const [updateBusy, setUpdateBusy] = useState(false);
-  const [updateNote, setUpdateNote] = useState<string | null>(null);
-  /**
-   * Build da Store: quem atualiza e a loja. Um botao "Check now" que devolve sempre erro e pior
-   * do que botao nenhum -- as duas linhas de atualizacao saem da lista.
-   */
-  const [isStoreBuild, setIsStoreBuild] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    void window.electron?.getBuildChannel?.().then((channel) => {
-      if (!cancelled) setIsStoreBuild(channel === 'store');
-    }).catch(() => undefined);
-    return () => { cancelled = true; };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    void window.electron?.getUpdateState?.().then((state) => {
-      if (!cancelled && state) setUpdateInfo(state);
-    }).catch(() => undefined);
-    const off = window.electron?.onUpdateState?.((payload) => {
-      if (payload) setUpdateInfo(payload);
-    });
-    return () => {
-      cancelled = true;
-      off?.();
-    };
-  }, []);
-
-  const runUpdateCheck = useCallback(async () => {
-    if (!window.electron?.checkForUpdates) return;
-    setUpdateBusy(true);
-    setUpdateNote(null);
-    try {
-      const result = await window.electron.checkForUpdates();
-      if (!result?.ok) {
-        setUpdateNote(
-          result?.code === 'UNSUPPORTED'
-            ? 'Updates run in the installed app only.'
-            : 'Could not reach the update server.',
-        );
-      } else if (result.state === 'current') {
-        setUpdateNote(`You're on the latest version (${result.version}).`);
-      } else {
-        setUpdateNote(`Version ${result.version} is downloading.`);
-        setUpdateInfo({ state: 'downloading', version: result.version });
-      }
-    } catch (e) {
-      setUpdateNote('Could not reach the update server.');
-    } finally {
-      setUpdateBusy(false);
-    }
-  }, []);
   const reduceMotion = useReducedMotion();
 
   /**
-   * Fecho com saída visível. Ativar a licença fechava o painel a seco no mesmo frame; aqui o
-   * conteúdo desvanece primeiro e a janela só desaparece depois. Ver `.zs-shell.is-dismissing`.
+   * Fecho com saída visível: o conteúdo desvanece primeiro e a janela só desaparece
+   * depois. Ver `.zs-shell.is-dismissing`.
    */
   const dismissWithFade = useCallback(() => {
     setIsDismissing(true);
@@ -238,7 +185,7 @@ export const PrecisionSettings: React.FC<PrecisionSettingsProps> = ({
   }, [toast]);
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen || isTestingWorkspace) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         if (editor) setEditor(null);
@@ -252,7 +199,7 @@ export const PrecisionSettings: React.FC<PrecisionSettingsProps> = ({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [isOpen, editor, onClose]);
+  }, [isOpen, editor, onClose, isTestingWorkspace]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -394,7 +341,11 @@ export const PrecisionSettings: React.FC<PrecisionSettingsProps> = ({
       onChange: (value: number) => void,
       format: (value: number) => string,
       step = 1,
-    ): SettingItem => ({ key, group, title, description, kind: 'range', raw, min, max, step, onChange, format, value: format(raw) });
+    ): SettingItem => {
+      const defaults: Record<string, number> = { radius: WHEEL_DEFAULTS.menuRadius, iconSize: WHEEL_DEFAULTS.iconSize, spacing: WHEEL_DEFAULTS.appSpacing, opacity: WHEEL_DEFAULTS.wheelOpacity, backdrop: WHEEL_DEFAULTS.wheelDimming, labelSize: WHEEL_DEFAULTS.labelSize, tileRoundness: WHEEL_DEFAULTS.tileRoundness, threshold: 60 };
+      return { key, group, title, description, kind: 'range', raw, min, max, step, onChange, format, value: format(raw), onResetValue: () => onChange(defaults[key]) };
+    };
+    const visual = wheelAppearance(config);
 
     return {
       general: [
@@ -430,12 +381,12 @@ export const PrecisionSettings: React.FC<PrecisionSettingsProps> = ({
         },
         {
           key: 'mouseButton', group: 'Mouse', title: 'Trigger button',
-          description: 'Side buttons are usually free; left and right stay with Windows.',
+          description: 'Choose Forward for the front side button, or Back for the rear side button. Enable Mouse trigger above.',
           kind: 'segmented', current: config.mouseTriggerButton ?? 'middle',
           choices: [
-            { value: 'middle', label: 'Wheel' },
-            { value: 'x1', label: 'Back' },
-            { value: 'x2', label: 'Forward' },
+            { value: 'middle', label: 'Middle' },
+            { value: 'x1', label: 'Back (side)' },
+            { value: 'x2', label: 'Forward (side)' },
           ],
           onChange: (value) => update('mouseTriggerButton', value as UIConfig['mouseTriggerButton']),
         },
@@ -451,17 +402,17 @@ export const PrecisionSettings: React.FC<PrecisionSettingsProps> = ({
       ],
       appearance: [
         {
-          key: 'theme', group: 'Theme', title: 'Rovyl surfaces',
+          key: 'theme', group: 'Theme', title: 'Settings theme',
           description: 'Applies to the window and title bar. The wheel remains dark.',
           kind: 'segmented', current: theme,
           choices: [{ value: 'black', label: 'Black' }, { value: 'white', label: 'White' }],
           onChange: (value) => update('appearanceTheme', value as UIConfig['appearanceTheme']),
         },
-        range('radius', 'Wheel', 'Orbital radius', 'Perceived wheel diameter.',
+        range('radius', 'Wheel layout', 'Wheel size', 'Move apps closer to or farther from the centre. The wheel adjusts to fit your screen.',
           config.menuRadius, 90, 220, (value) => update('menuRadius', value), (value) => `${Math.round(value)} px`),
-        range('iconSize', 'Wheel', 'Icon size', 'Visual weight of each target.',
+        range('iconSize', 'Wheel layout', 'App icon size', 'Size of app tiles. Dense wheels may shrink them to fit.',
           config.iconSize, 36, 92, (value) => update('iconSize', value), (value) => `${Math.round(value)} px`),
-        range('spacing', 'Wheel', 'Target spacing', 'Free space between items.',
+        range('spacing', 'Wheel layout', 'Space between apps', 'Increase the gap between app tiles. This can also enlarge the wheel.',
           config.appSpacing ?? 10, 0, 40, (value) => update('appSpacing', value), (value) => `${Math.round(value)} px`),
         {
           key: 'radialHoverColor', group: 'Wheel', title: 'Hover color',
@@ -484,15 +435,24 @@ export const PrecisionSettings: React.FC<PrecisionSettingsProps> = ({
           onChange: (value) => update('radialSelectionMode', value as UIConfig['radialSelectionMode']),
         },
         {
-          key: 'labels', group: 'Wheel', title: 'Persistent labels',
-          description: 'Keep every target name visible.',
-          kind: 'bool', enabled: config.alwaysShowAppLabels,
-          onToggle: () => update('alwaysShowAppLabels', !config.alwaysShowAppLabels),
+          key: 'labels', group: 'App names', title: 'Show app names',
+          description: 'Hide names, show the highlighted app’s name, or keep all names visible.',
+          kind: 'segmented', current: !config.showLabels ? 'off' : config.alwaysShowAppLabels ? 'always' : 'hover',
+          choices: [{ value: 'off', label: 'Hidden' }, { value: 'hover', label: 'On hover' }, { value: 'always', label: 'Always' }],
+          onChange: value => setConfig(current => ({ ...current, showLabels: value !== 'off', alwaysShowAppLabels: value === 'always' })),
         },
-        range('opacity', 'Presence', 'Wheel opacity', 'Make the interface more solid or subtle.',
-          config.menuOpacity, 0.35, 1, (value) => update('menuOpacity', value), (value) => `${Math.round(value * 100)}%`, 0.01),
-        range('backdrop', 'Presence', 'Background dimming', 'How much the rest of the screen recedes.',
-          config.backdropOpacity ?? 1, 0, 1, (value) => update('backdropOpacity', value), (value) => `${Math.round(value * 100)}%`, 0.01),
+        range('labelSize', 'App names', 'Name text size', 'Text size of the names beside app icons.', visual.labelSize, 10, 20, value => update('labelSize', value), value => `${value} px`),
+        {
+          key: 'locationLabel', group: 'App names', title: 'Show current location',
+          description: 'Show the workspace or folder path below the wheel.',
+          kind: 'bool', enabled: config.showLocationLabel !== false,
+          onToggle: () => update('showLocationLabel', config.showLocationLabel === false),
+        },
+        range('tileRoundness', 'Wheel style', 'Rounded corners', 'From square app tiles to rounded app tiles.', visual.tileRoundness, 0, 46, value => update('tileRoundness', value), value => `${value} px`),
+        range('opacity', 'Transparency', 'Wheel opacity', '100% keeps icons and names fully visible. Lower values make them see-through.',
+          visual.opacity, 0.35, 1, (value) => update('wheelOpacity', value), (value) => `${Math.round(value * 100)}%`, 0.01),
+        range('backdrop', 'Transparency', 'Shading behind the wheel', 'Darkens the area around the wheel. 0% turns shading off; the rest of the screen stays unchanged.',
+          visual.dimming, 0, 0.8, (value) => update('wheelDimming', value), (value) => `${Math.round(value * 100)}%`, 0.01),
       ],
       spaces: [
         ...config.workspaces.map((workspace, index) => ({
@@ -516,34 +476,6 @@ export const PrecisionSettings: React.FC<PrecisionSettingsProps> = ({
         },
       ],
       advanced: [
-        ...(!isStoreBuild && updateInfo.state === 'ready'
-          ? [{
-              key: 'update-ready',
-              group: 'Updates',
-              title: `Version ${updateInfo.version ?? ''} is ready`.replace(/\s+/g, ' ').trim(),
-              description: 'Downloaded and verified. Rovyl restarts to finish.',
-              kind: 'action' as const,
-              actionLabel: 'Restart now',
-              actionIcon: ArrowUpFromLine,
-              onRun: () => window.electron?.installUpdateNow?.(),
-            }]
-          : []),
-        ...(isStoreBuild
-          ? []
-          : [{
-              key: 'update-check',
-              group: 'Updates',
-              title: 'Check for updates',
-              description:
-                updateNote ??
-                (updateInfo.state === 'downloading'
-                  ? `Downloading version ${updateInfo.version ?? ''}…`.replace(/\s+/g, ' ')
-                  : 'Rovyl checks automatically a few seconds after launch.'),
-              kind: 'action' as const,
-              actionLabel: updateBusy ? 'Checking…' : 'Check now',
-              actionIcon: ArrowDownToLine,
-              onRun: () => void runUpdateCheck(),
-            }]),
         {
           key: 'performance', group: 'Performance', title: 'Precision mode',
           description: 'Prioritize immediate response and reduce visual effects.',
@@ -551,32 +483,23 @@ export const PrecisionSettings: React.FC<PrecisionSettingsProps> = ({
           onToggle: () => update('performanceMode', !config.performanceMode),
         },
         {
-          key: 'game', group: 'Protection', title: 'Fullscreen protection',
-          description: 'Prevent accidental openings during games and videos.',
-          kind: 'bool', enabled: gameMode.enabled,
-          onToggle: () => updateGameMode({ enabled: !gameMode.enabled }),
+          key: 'pause-fullscreen', group: 'Pause Rovyl', title: 'In fullscreen apps',
+          description: 'Pause activation while an app fills the screen. Your mouse button works normally.',
+          kind: 'bool', enabled: gameMode.pauseFullscreen ?? (gameMode.enabled && gameMode.mode === 'all'),
+          onToggle: () => updateGameMode({ pauseFullscreen: !(gameMode.pauseFullscreen ?? (gameMode.enabled && gameMode.mode === 'all')) }),
         },
-        ...(gameMode.enabled ? [{
-          key: 'scope', group: 'Protection', title: 'Scope', description: 'All fullscreen apps or only a selected list.',
-          kind: 'segmented' as const, current: gameMode.mode,
-          choices: [{ value: 'all', label: 'All' }, { value: 'list', label: 'List' }],
-          onChange: (value: number | string) => updateGameMode({ mode: value as 'all' | 'list' }),
-        }] : []),
-        ...(gameMode.enabled && gameMode.mode === 'list' ? [
-          {
-            key: 'auto-games', group: 'Protection', title: 'Detect games automatically',
-            description: 'Uses game-store folders and engine files; protection still applies only in fullscreen.',
-            kind: 'bool' as const, enabled: gameMode.autoDetectGames,
-            onToggle: () => updateGameMode({ autoDetectGames: !gameMode.autoDetectGames }),
-          },
-          {
-            key: 'blocked', group: 'Protection', title: 'Protected applications',
-            description: 'Choose installed applications visually. No executable names required.',
-            kind: 'open' as const,
-            value: gameMode.blockedApps ? 'Edit list' : 'Choose apps',
-            onOpen: () => setEditor({ kind: 'blocked' as const }),
-          },
-        ] : []),
+        {
+          key: 'pause-selected', group: 'Pause Rovyl', title: 'In selected apps',
+          description: 'Pause whenever a selected app is active, including in a window.',
+          kind: 'bool', enabled: gameMode.pauseSelected ?? (gameMode.enabled && gameMode.mode === 'list'),
+          onToggle: () => updateGameMode({ pauseSelected: !(gameMode.pauseSelected ?? (gameMode.enabled && gameMode.mode === 'list')) }),
+        },
+        {
+          key: 'blocked', group: 'Pause Rovyl', title: 'Selected apps',
+          description: 'Choose the apps where you want Rovyl to stay out of the way.',
+          kind: 'open', value: gameMode.blockedApps ? 'Edit list' : 'Choose apps',
+          onOpen: () => setEditor({ kind: 'blocked' }),
+        },
         {
           key: 'export', group: 'Data', title: 'Export settings',
           description: 'Save a portable copy of your configuration.',
@@ -593,7 +516,7 @@ export const PrecisionSettings: React.FC<PrecisionSettingsProps> = ({
         },
       ],
     };
-  }, [config, gameMode, theme, apps, update, updateInfo, updateBusy, updateNote, isStoreBuild, runUpdateCheck, onReset, deleteWorkspace, reorderWorkspaces]);
+  }, [config, gameMode, theme, apps, update, onReset, deleteWorkspace, reorderWorkspaces]);
 
   const trimmedQuery = query.trim().toLowerCase();
   const activeMeta = SECTIONS.find((section) => section.id === sectionId)!;
@@ -674,6 +597,7 @@ export const PrecisionSettings: React.FC<PrecisionSettingsProps> = ({
           </nav>
 
           <div className="zs-sidebar-foot">
+            <span role="status" aria-live="polite">{saveStatus === 'saved' ? '✓ Saved' : saveStatus === 'saving' ? 'Saving…' : 'Could not save changes'}</span>
             <b>Rovyl</b>
             {appVersion && <span>{appVersion}</span>}
           </div>
@@ -733,6 +657,24 @@ export const PrecisionSettings: React.FC<PrecisionSettingsProps> = ({
         <AnimatePresence>
           {editor && (
             <SettingsEditor
+              saveStatus={saveStatus}
+              onTestWorkspace={onTestWorkspace}
+              duplicateWorkspace={(index) => {
+                const original = config.workspaces[index];
+                if (!original) return;
+                const used = new Set(config.workspaces.map(ws => ws.name));
+                let name = `${original.name} copy`;
+                let n = 2;
+                while (used.has(name)) name = `${original.name} copy ${n++}`;
+                const copy = structuredClone(original);
+                copy.id = crypto.randomUUID();
+                copy.name = name;
+                const renewIds = (items: AppItem[]): AppItem[] => items.map(item => ({ ...item, id: crypto.randomUUID(), shortcut: undefined, ...(item.children ? { children: renewIds(item.children) } : {}) }));
+                copy.apps = renewIds(copy.apps);
+                const indexOfCopy = config.workspaces.length;
+                setConfig(current => ({ ...current, workspaces: withPositionalHotkeys([...current.workspaces, copy]) }));
+                setEditor({ kind: 'workspace', index: indexOfCopy });
+              }}
               editor={editor}
               close={() => setEditor(null)}
               config={config}
@@ -866,7 +808,7 @@ function SettingRow({ item }: { item: SettingItem }) {
           </div>
         )}
 
-        {item.kind === 'range' && <span className="zs-readout">{item.value}</span>}
+        {item.kind === 'range' && <><span className="zs-readout">{item.value}</span><button type="button" className="zs-reset-slider" aria-label={`Reset ${item.title} to default`} title="Reset to default" onClick={item.onResetValue}><RotateCcw size={15} /></button></>}
 
         {item.kind === 'color' && <ColorSettingControl item={item} describedBy={describedBy} />}
 
@@ -1038,7 +980,7 @@ function ProtectedAppsManager({ value, onChange }: { value: string; onChange: (v
             <div className="zs-workspace-item" key={row.raw}>
               <div className="zs-workspace-item-main">
                 <span className="zs-workspace-app-icon"><Monitor size={16} /></span>
-                <div className="zs-workspace-item-copy"><b>{row.label}</b><small><em>Protected in fullscreen</em></small></div>
+                <div className="zs-workspace-item-copy"><b>{row.label}</b><small><em>Pauses while active</em></small></div>
                 <div className="zs-item-actions">
                   <button type="button" onClick={() => commit(rows.filter((item) => item.raw !== row.raw))} aria-label={`Remove ${row.label}`}><Trash2 size={13} /></button>
                 </div>
@@ -1090,6 +1032,9 @@ function ProtectedAppsManager({ value, onChange }: { value: string; onChange: (v
 }
 
 function SettingsEditor({
+  saveStatus,
+  onTestWorkspace,
+  duplicateWorkspace,
   editor,
   close,
   config,
@@ -1102,6 +1047,9 @@ function SettingsEditor({
   onCloseSettings,
   reduceMotion,
 }: {
+  saveStatus: PrecisionSettingsProps['saveStatus'];
+  onTestWorkspace: PrecisionSettingsProps['onTestWorkspace'];
+  duplicateWorkspace: (index: number) => void;
   editor: Exclude<Editor, null>;
   close: () => void;
   config: UIConfig;
@@ -1121,12 +1069,12 @@ function SettingsEditor({
 
   if (editor.kind === 'shortcut') {
     title = 'Global shortcut';
-    description = 'Record a combination that does not conflict with your applications.';
+    description = 'Record a keyboard combination. For a side mouse button, use Mouse trigger and Trigger button in Controls.';
     content = <ShortcutRecorder value={config.globalShortcut} onChange={(value) => update('globalShortcut', value)} />;
   }
 
   if (editor.kind === 'blocked') {
-    title = 'Protected applications';
+    title = 'Pause in selected apps';
     description = 'Choose installed applications; Rovyl handles process matching automatically.';
     content = (
       <ProtectedAppsManager
@@ -1145,6 +1093,7 @@ function SettingsEditor({
     description = 'Organize shortcuts and control how this workspace behaves.';
     content = (
       <WorkspaceManager
+        key={workspace.id}
         workspace={workspace}
         workspaceIndex={index}
         config={config}
@@ -1187,6 +1136,11 @@ function SettingsEditor({
         </header>
         <div className="zs-editor-body">{content}</div>
         <footer>
+          <span role="status" style={{ marginRight: 'auto', fontSize: 12 }}>{saveStatus === 'saved' ? '✓ Saved' : saveStatus === 'saving' ? 'Saving…' : 'Could not save changes'}</span>
+          {editor.kind === 'workspace' && <>
+            <button type="button" className="zs-btn" onClick={() => duplicateWorkspace(editor.index)}>Duplicate workspace</button>
+            <button type="button" className="zs-btn" disabled={!config.workspaces[editor.index]?.apps.length} onClick={() => onTestWorkspace(config.workspaces[editor.index])}>Test workspace</button>
+          </>}
           <button type="button" className="zs-btn is-primary" onClick={close}>Done</button>
         </footer>
       </motion.div>
@@ -1478,6 +1432,9 @@ function WorkspaceManager({
   const { apps: installedApps, loading: loadingApps, error: appsError, reload: loadInstalledApps } =
     useInstalledApps(addMode === 'app');
   const [appSearch, setAppSearch] = useState('');
+  const [selectedApps, setSelectedApps] = useState<InstalledApp[]>([]);
+  const [addingApps, setAddingApps] = useState(false);
+  const [replaceIndex, setReplaceIndex] = useState<number | null>(null);
   const [url, setUrl] = useState('');
   const [urlLabel, setUrlLabel] = useState('');
   const [folderPath, setFolderPath] = useState('');
@@ -1511,9 +1468,8 @@ function WorkspaceManager({
     setEditingIndex(openEditor ? newIndex : null);
   };
 
-  const addAppPath = async (path: string, label?: string) => {
+  const createAppItem = async (path: string, label?: string): Promise<AppItem> => {
     const cleanPath = path.trim();
-    if (!cleanPath) return;
     const displayName = label?.trim() || cleanPath.split(/[/\\]/).filter(Boolean).pop()?.replace(/\.(exe|lnk|bat|cmd)$/i, '') || 'Application';
     let customIconUrl: string | undefined;
     try { customIconUrl = (await window.electron?.getFileIcon?.(cleanPath)) || undefined; } catch { /* use fallback */ }
@@ -1531,12 +1487,34 @@ function WorkspaceManager({
         /* mantém o palpite local */
       }
     }
-    addItem(isIde ? { ...nextItem, hasRecents: true, terminalCommands: [] } : nextItem, isIde);
+    return isIde ? { ...nextItem, hasRecents: true, terminalCommands: [] } : nextItem;
+  };
+
+  const openAppPicker = (index: number | null = null) => {
+    setReplaceIndex(index);
+    setSelectedApps([]);
+    setAppSearch('');
+    setAddMode('app');
+  };
+
+  const commitApps = async (choices: InstalledApp[]) => {
+    if (addingApps || !choices.length) return;
+    setAddingApps(true);
+    try {
+      const items = await Promise.all(choices.map(item => createAppItem(item.Path!, item.DisplayName || item.Name)));
+      const apps = [...workspace.apps];
+      if (replaceIndex !== null) apps.splice(replaceIndex, 1, items[0]);
+      else apps.push(...items);
+      updateWorkspace(workspaceIndex, { apps });
+      setEditingIndex(replaceIndex);
+      setAddMode(null);
+      setSelectedApps([]);
+    } finally { setAddingApps(false); }
   };
 
   const chooseAppFile = async () => {
     const path = await window.electron?.selectFile?.();
-    if (path) await addAppPath(path);
+    if (path) await commitApps([{ Path: path, Name: path.split(/[/\\]/).pop() || 'Application' }]);
   };
 
   const addUrl = async () => {
@@ -1545,7 +1523,7 @@ function WorkspaceManager({
     if (!/^https?:\/\//i.test(normalized)) normalized = `https://${normalized}`;
     let fallbackLabel = normalized;
     try { fallbackLabel = new URL(normalized).hostname.replace(/^www\./, ''); } catch { /* keep URL */ }
-    const icon = await resolveWebsiteIconFields(normalized);
+    const icon = websiteIconFields(normalized);
     addItem({
       id: crypto.randomUUID(), type: 'app', label: urlLabel.trim() || fallbackLabel,
       iconName: 'Globe', iconSource: icon?.iconSource || 'lucide', customIconUrl: icon?.customIconUrl,
@@ -1609,6 +1587,12 @@ function WorkspaceManager({
     [next[from], next[to]] = [next[to], next[from]];
     updateWorkspace(workspaceIndex, { apps: next });
     if (editingIndex === from) setEditingIndex(to);
+    else if (editingIndex === to) setEditingIndex(from);
+  };
+
+  const removeItem = (index: number) => {
+    updateWorkspace(workspaceIndex, { apps: workspace.apps.filter((_, i) => i !== index) });
+    setEditingIndex(current => current === null || current < index ? current : current === index ? null : current - 1);
   };
 
   /** Confirmação vinda do main: só um perfil real de IDE habilita a secção de recentes. */
@@ -1814,43 +1798,47 @@ function WorkspaceManager({
             <p>{workspace.apps.length} {workspace.apps.length === 1 ? 'configured item' : 'configured items'}</p>
           </div>
           <div className="zs-add-actions" aria-label="Add shortcut">
-            <button type="button" className={addMode === 'app' ? 'is-active' : ''} onClick={() => setAddMode(addMode === 'app' ? null : 'app')}><Monitor size={14} /> Application</button>
+            <button type="button" className={addMode === 'app' ? 'is-active' : ''} onClick={() => openAppPicker()}><Plus size={14} /> Add apps</button>
             <button type="button" className={addMode === 'url' ? 'is-active' : ''} onClick={() => setAddMode(addMode === 'url' ? null : 'url')}><Globe2 size={14} /> URL</button>
             <button type="button" className={addMode === 'folder' ? 'is-active' : ''} onClick={() => setAddMode(addMode === 'folder' ? null : 'folder')}><FolderOpen size={14} /> Folder</button>
           </div>
         </div>
 
-        <div className={`zs-workspace-workbench${addMode ? ' is-split' : ''}`}>
+        <div className={`zs-workspace-workbench${!addMode ? ' has-preview' : ''}`}>
         <AnimatePresence mode="wait">
           {addMode && (
             <motion.div className="zs-add-panel" key={addMode} initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
               {addMode === 'app' && (
                 <>
+                  <div className="zs-picker-title"><div><h3>{replaceIndex !== null ? 'Replace app' : `Add apps to ${workspace.name}`}</h3><p>{replaceIndex !== null ? 'Choose one application for this position.' : 'Select your apps, then add them together.'}</p></div><button type="button" className="zs-btn" disabled={addingApps} onClick={() => setAddMode(null)} aria-label="Close app picker"><X size={16} /></button></div>
                   <div className="zs-add-panel-head">
                     <label className="zs-search is-manager-search">
                       <Search size={14} />
-                      <input value={appSearch} onChange={(event) => setAppSearch(event.target.value)} placeholder="Search installed applications" />
+                      <input autoFocus aria-label="Search installed applications" value={appSearch} onChange={(event) => setAppSearch(event.target.value)} placeholder="Search installed applications" />
                     </label>
-                    <button type="button" className="zs-btn" onClick={chooseAppFile}><FilePlus2 size={14} /> Choose file</button>
+                    <button type="button" className="zs-btn" disabled={addingApps} onClick={chooseAppFile}><FilePlus2 size={14} /> Browse files</button>
                   </div>
                   <div className="zs-installed-apps" onScroll={handleAppsScroll}>
                     {loadingApps ? (
                       <div className="zs-manager-empty"><Loader2 className="zs-spin" size={18} /> Loading applications…</div>
                     ) : visibleApps.length ? (
-                      visibleApps.map((item, index) => (
-                        <button type="button" key={`${item.Path}-${index}`} onClick={() => addAppPath(item.Path!, item.DisplayName || item.Name)}>
+                      visibleApps.map((item, index) => {
+                        const added = workspace.apps.some(app => app.command.toLowerCase() === item.Path?.toLowerCase());
+                        const selected = selectedApps.some(app => app.Path === item.Path);
+                        return (
+                        <button type="button" key={`${item.Path}-${index}`} aria-pressed={selected} className={selected ? 'is-selected' : ''} disabled={added || addingApps || !item.Path} title={item.Path} onClick={() => setSelectedApps(current => selected ? current.filter(app => app.Path !== item.Path) : replaceIndex !== null ? [item] : [...current, item])}>
                           <NativeAppIcon path={item.Path} size={28} className="zs-installed-app-icon" fallback={<Monitor size={15} />} />
-                          <div><b>{item.DisplayName || item.Name}</b><small>{item.Path}</small></div>
-                          <Plus size={14} />
+                          <div><b>{item.DisplayName || item.Name}</b><small>{added ? 'Already added' : selected ? 'Selected' : 'Application'}</small></div>
+                          {selected || added ? <Check size={16} /> : <Plus size={14} />}
                         </button>
-                      ))
+                      );})
                     ) : appsError ? (
                       <div className="zs-manager-empty">
                         Could not list applications.
                         <button type="button" className="zs-btn" onClick={() => loadInstalledApps(true)}>Try again</button>
                       </div>
                     ) : (
-                      <div className="zs-manager-empty">No applications found. Use “Choose file”.</div>
+                      <div className="zs-manager-empty">{appSearch ? 'No matches. Try another name or browse files.' : 'No applications found. Browse files to add one.'}</div>
                     )}
                   </div>
                   {!loadingApps && installedApps.length > 0 && (
@@ -1859,6 +1847,7 @@ function WorkspaceManager({
                       <button type="button" onClick={() => loadInstalledApps(true)}>Reload list</button>
                     </div>
                   )}
+                  <div className="zs-picker-confirm"><span role="status">{selectedApps.length} selected</span><button type="button" className="zs-btn" disabled={addingApps} onClick={() => setAddMode(null)}>Cancel</button><button type="button" className="zs-btn is-primary" disabled={!selectedApps.length || addingApps} onClick={() => void commitApps(selectedApps)}>{addingApps ? 'Adding…' : replaceIndex !== null ? 'Replace app' : `Add ${selectedApps.length || ''} ${selectedApps.length === 1 ? 'app' : 'apps'}`}</button></div>
                 </>
               )}
               {addMode === 'url' && (
@@ -1883,7 +1872,11 @@ function WorkspaceManager({
           )}
         </AnimatePresence>
 
-        <div className="zs-workspace-items">
+        {!addMode && <section className="zs-wheel-preview" aria-label="Workspace wheel preview"><h3>Your wheel</h3><p>Click an app to edit. Drag it to another position.</p><div className="zs-preview-orbit" style={{ width: Math.max(280, workspace.apps.length * 25), height: Math.max(280, workspace.apps.length * 25) }}><div className="zs-preview-center"><WorkspaceIcon size={24} /><span>{workspace.name}</span></div>{workspace.apps.map((item, index) => {
+          const angle = (index * 360 / workspace.apps.length - 90) * Math.PI / 180;
+          return <button type="button" key={item.id} className={editingIndex === index ? 'is-selected' : ''} style={{ left: `${50 + 37 * Math.cos(angle)}%`, top: `${50 + 37 * Math.sin(angle)}%` }} aria-label={`Edit ${item.label}, position ${index + 1}`} aria-pressed={editingIndex === index} draggable onDragStart={event => { event.dataTransfer.setData('text/plain', String(index)); setItemDragIndex(index); }} onDragEnd={() => setItemDragIndex(null)} onDragOver={event => { if (itemDragIndex !== null) event.preventDefault(); }} onDrop={event => { event.preventDefault(); if (itemDragIndex !== null) reorderItems(itemDragIndex, itemDragIndex < index ? index + 1 : index); setItemDragIndex(null); }} onClick={() => setEditingIndex(index)}><WorkspaceItemIcon item={item} /><span>{index + 1}. {item.label}</span></button>;
+        })}{!workspace.apps.length && <button type="button" className="zs-preview-empty" onClick={() => openAppPicker()}><Plus size={22} /><span>Add your first apps</span></button>}</div></section>}
+        <div className="zs-workspace-items" hidden={!!addMode}>
           {workspace.apps.map((item, index) => {
             /** Resposta do main manda; o palpite local só cobre a espera e o modo web. */
             const confirmed = ideSupport.get(ideProbeKey(item));
@@ -1946,11 +1939,13 @@ function WorkspaceManager({
                   <button type="button" disabled={index === 0} onClick={() => moveItem(index, -1)} aria-label={`Move ${item.label} up`}><ChevronUp size={14} /></button>
                   <button type="button" disabled={index === workspace.apps.length - 1} onClick={() => moveItem(index, 1)} aria-label={`Move ${item.label} down`}><ChevronDown size={14} /></button>
                   <button type="button" className={editingIndex === index ? 'is-active' : ''} onClick={() => setEditingIndex(editingIndex === index ? null : index)} aria-label={`Edit ${item.label}`}><Pencil size={13} /></button>
-                  <button type="button" onClick={() => updateWorkspace(workspaceIndex, { apps: workspace.apps.filter((_, itemIndex) => itemIndex !== index) })} aria-label={`Remove ${item.label}`}><Trash2 size={13} /></button>
+                  <button type="button" onClick={() => removeItem(index)} aria-label={`Remove ${item.label}`}><Trash2 size={13} /></button>
                 </div>
               </div>
               {editingIndex === index && (
                 <div className="zs-workspace-item-editor">
+                  <button type="button" className="zs-btn" onClick={() => openAppPicker(index)}>Replace app</button>
+                  <details className="zs-app-icon-details"><summary>Change icon</summary><IconPicker selectedIcon={item.iconName || 'AppWindow'} config={config} onSelect={iconName => updateItem(index, { iconName, iconSource: 'lucide', customIconUrl: undefined })} /></details>
                   <label className="zs-field"><span>Name</span><input value={item.label} onChange={(event) => updateItem(index, { label: event.target.value })} /></label>
                   {/*
                     Aplicações não mostram o comando: quem adicionou o atalho já escolheu a app, e

@@ -15,10 +15,6 @@ const outputDir =
 
 console.log(`electron-builder output: ${outputDir}`);
 
-/**
- * Argumentos extra passam para o electron-builder tal e qual. E assim que o `dist:store` pede o
- * alvo appx (`--win appx`) sem precisar de um segundo runner nem de mexer no alvo por omissao.
- */
 const forwardedArgs = process.argv.slice(2);
 if (forwardedArgs.length) {
   console.log(`electron-builder args: ${forwardedArgs.join(" ")}`);
@@ -30,6 +26,7 @@ const child = spawn(
     path.join(projectRoot, "node_modules", "electron-builder", "cli.js"),
     `--config.directories.output=${outputDir}`,
     ...forwardedArgs,
+    "--publish", "never",
   ],
   {
     cwd: projectRoot,

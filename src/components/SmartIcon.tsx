@@ -1,4 +1,6 @@
 import React from 'react';
+import { Globe } from 'lucide-react';
+import { isLocalIcon } from '../localIcons';
 
 interface SmartIconProps {
   src: string;
@@ -27,6 +29,7 @@ export const SmartIcon: React.FC<SmartIconProps> = ({
   onError,
 }) => {
   const pct = `${displayScale * 100}%`;
+  if (!isLocalIcon(src)) return <Globe className={className} style={{ width: pct, height: pct }} aria-label={alt || 'Shortcut'} />;
   return (
     <img
       src={src}

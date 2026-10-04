@@ -1,22 +1,7 @@
 import { LucideIcon } from "lucide-react";
 
-export type SubscriptionTier = "free" | "plus" | "pro";
-
-export interface UserProfile {
-  id: string;
-  name: string;
-  email: string;
-  isPremium: boolean;
-  /** Paid tier when billing supports Plus vs Pro; optional until checkout is wired. */
-  planTier?: SubscriptionTier;
-  isAdmin?: boolean;
-  /** Quantos dispositivos a licenca cobre; vem do servidor na ativacao. */
-  deviceLimit?: number;
-  trialEndsAt?: string; // ISO Date string
-  avatarUrl?: string;
-  /** Local profile only (billing / account sync can come later). */
-  address?: string;
-}
+/** Opaque metadata preserved when importing an older profile; there are no accounts. */
+export type UserProfile = Record<string, unknown>;
 
 export interface AppItem {
   id: string;
@@ -57,6 +42,8 @@ export interface Coordinates {
 }
 
 export interface GameModeConfig {
+  pauseFullscreen?: boolean;
+  pauseSelected?: boolean;
   enabled: boolean;
   mode: "all" | "list"; // 'all' = qualquer app fullscreen; 'list' = só apps da lista em fullscreen
   blockedApps: string;
@@ -100,6 +87,10 @@ export interface UIConfig {
   fixedPosition: boolean;
   backdropOpacity: number;
   menuOpacity: number;
+  wheelOpacity?: number;
+  wheelDimming?: number;
+  labelSize?: number;
+  tileRoundness?: number;
   menuBackgroundStyle: "circle" | "fullscreen";
   appSpacing: number; // New: spacing between apps in radial menu
   activationThreshold: number;
@@ -107,9 +98,8 @@ export interface UIConfig {
   showLabels: boolean;
   /** When true, app names stay visible for all items; when false, only the hovered/selected item shows its label. */
   alwaysShowAppLabels: boolean;
+  showLocationLabel?: boolean;
   showBattery: boolean; // New
-  showWeather: boolean; // New
-  weatherLocation?: string; // New: CEP or city name for weather
   clockPosition: ClockHudPosition;
   gameMode: GameModeConfig;
   globalShortcut: string; // New: Global keyboard shortcut (e.g. 'Alt+Space')
@@ -170,14 +160,6 @@ export interface ElectronAPI {
   showWindow: () => void;
   requestKeyboardFocus?: () => void;
   getAppVersion?: () => Promise<string>;
-  /** Canal de distribuição: 'store' (MSIX) não tem atualização própria. */
-  getBuildChannel?: () => Promise<'store' | 'direct'>;
-  onUpdateState?: (
-    callback: (payload: { state: 'downloading' | 'ready'; version?: string }) => void,
-  ) => () => void;
-  getUpdateState?: () => Promise<{ state: string; version?: string | null }>;
-  checkForUpdates?: () => Promise<{ ok: boolean; state?: string; version?: string; code?: string; error?: string }>;
-  installUpdateNow?: () => void;
   wasOpenedAtLogin?: () => Promise<boolean>;
   /** O main confirma se a app tem mesmo um perfil de IDE com MRU (não adivinhar por nome). */
   appSupportsRecents?: (appName: string, appCommand: string) => Promise<boolean>;
@@ -267,16 +249,7 @@ export interface ElectronAPI {
   } | null>;
   setGameMode: (config: GameModeConfig) => void;
   prewarmApps?: (commands: string[]) => void;
-  getVolume: () => Promise<number>;
-  setVolume: (value: number) => void;
-  getBrightness: () => Promise<number>;
-  setBrightness: (value: number) => void;
-  getHardwareCapabilities: () => Promise<{ hasWifi: boolean; hasBluetooth: boolean }>;
-  toggleWifi: (enabled: boolean) => Promise<boolean>;
-  toggleBluetooth: (enabled: boolean) => Promise<boolean>;
   getFileIcon: (path: string) => Promise<string | null>;
-  /** Favicon obtido no main (data URL) — o renderer costuma falhar com <img https://…>. */
-  getWebsiteFaviconDataUrl?: (pageUrl: string) => Promise<string | null>;
   minimizeWindow: () => void;
   toggleMaximize: () => void;
   quitApp: () => void;
@@ -290,7 +263,6 @@ export interface ElectronAPI {
   /** Removes a file only if it lives under userData/custom-icons (safe no-op otherwise). */
   removeManagedCustomIcon: (urlOrPath?: string) => Promise<void>;
   getInstalledApps: (forceRefresh?: boolean) => Promise<any[]>;
-  getOnboardingApps: () => Promise<any[]>;
   getStartupApps: () => Promise<any[]>;
   onExecutionError: (callback: (errorMsg: string) => void) => () => void;
   relaunchApp: () => void;
@@ -328,12 +300,7 @@ export interface ElectronAPI {
   ) => void;
   exportConfig: () => Promise<{ success: boolean; error?: string }>;
   importConfig: () => Promise<{ success: boolean; error?: string }>;
-  startGoogleAuth: () => void;
-  onGoogleAuthSuccess: (callback: (user: any) => void) => () => void;
-  onGoogleAuthError?: (callback: (payload: { code?: string; message?: string; userDataPath?: string }) => void) => () => void;
   savePersistenceLog: (message: string) => void;
-  /** Open URL in the OS default browser (shell.openExternal). */
-  openExternalUrl?: (url: string) => Promise<{ ok: boolean; error?: string }>;
   /** OS-native uninstall flow (Windows uninstaller / Apps settings; macOS Finder). */
   openSystemUninstall?: () => Promise<{
     ok: boolean;

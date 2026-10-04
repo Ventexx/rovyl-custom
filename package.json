@@ -7,36 +7,31 @@
   "description": "Rovyl radial launcher",
   "repository": {
     "type": "git",
-    "url": "https://github.com/HenryCauan/rovyl.git"
+    "url": "https://github.com/Ventexx/rovyl-custom.git"
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build && node scripts/verify-radial-windowing.mjs && node scripts/generate-win-icon.mjs && node scripts/generate-appx-assets.mjs",
+    "build": "tsc && vite build && node scripts/verify-radial-windowing.mjs && node scripts/generate-win-icon.mjs",
     "electron": "wait-on tcp:5173 && cross-env NODE_ENV=development node scripts/launch-electron.js",
-    "start": "node scripts/start-local-runtime.cjs",
-    "start:runtime": "concurrently -k \"npm run dev\" \"npm run electron\"",
+    "start": "concurrently -k \"npm run dev\" \"npm run electron\"",
     "dist": "npm run build && node scripts/run-electron-builder.mjs",
     "test:win32-launch": "node --test backend/win32-launch.test.cjs",
     "test:persistence-shape": "node scripts/persistence-normalize-smoke.mjs",
     "verify:radial-windowing": "node scripts/verify-radial-windowing.mjs",
-    "release": "node scripts/release.mjs",
-    "release:check": "node scripts/release.mjs --check",
-    "dist:store": "npm run build && node scripts/run-electron-builder.mjs --win appx --publish never"
+    "test": "node --test backend/*.test.cjs && node scripts/persistence-normalize-smoke.mjs && node scripts/verify-radial-windowing.mjs",
+    "test:renderer": "node scripts/smoke-renderer.cjs"
   },
   "dependencies": {
     "@fontsource-variable/instrument-sans": "^5.3.0",
     "@fontsource-variable/inter": "^5.2.8",
     "@fontsource-variable/space-grotesk": "^5.2.10",
-    "@tailwindcss/vite": "^4.3.0",
     "active-win": "^8.2.1",
-    "electron-updater": "^6.8.9",
     "framer-motion": "^10.16.4",
     "lucide-react": "^0.292.0",
     "node-global-key-listener": "^0.1.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "sql.js": "^1.14.1",
-    "tailwindcss": "^4.3.0"
+    "sql.js": "^1.14.1"
   },
   "devDependencies": {
     "@types/react": "^18.2.37",
@@ -51,7 +46,9 @@
     "sharp": "^0.35.3",
     "typescript": "^5.2.2",
     "vite": "^8.2.1",
-    "wait-on": "^7.1.0"
+    "wait-on": "^7.1.0",
+    "tailwindcss": "^4.3.0",
+    "@tailwindcss/vite": "^4.3.0"
   },
   "build": {
     "appId": "com.henry.rovyl",
@@ -60,27 +57,19 @@
     "files": [
       "dist/**/*",
       "backend/**/*",
-      "resources/bin/**/*",
+      "!backend/*.test.cjs",
       "package.json"
     ],
     "asar": true,
     "asarUnpack": [
       "backend/*.ps1",
-      "resources/bin/**/*",
       "node_modules/sql.js/dist/sql-wasm.wasm",
       "node_modules/active-win/**/*"
     ],
     "directories": {
       "output": "build-out"
     },
-    "publish": {
-      "provider": "github",
-      "owner": "HenryCauan",
-      "repo": "rovyl",
-      "releaseType": "release"
-    },
     "afterPack": "./scripts/after-pack-win-icon.cjs",
-    "afterAllArtifactBuild": "./scripts/after-all-artifact-win-icon.cjs",
     "win": {
       "target": [
         "nsis"
@@ -97,27 +86,16 @@
       "uninstallerSidebar": "build/installer-sidebar.bmp",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
+      "createDesktopShortcut": false,
+      "runAfterFinish": true,
       "guid": "5e135f2a-7b3b-4e12-8c14-998822334455",
       "artifactName": "${productName}.${ext}",
       "include": "nsis/installer.nsh",
       "deleteAppDataOnUninstall": true
-    },
-    "appx": {
-      "identityName": "HenryCa.Rovyl",
-      "publisher": "CN=B2313BE4-E4A4-4805-A379-905ED98AD53F",
-      "publisherDisplayName": "HenryCa",
-      "applicationId": "Rovyl",
-      "displayName": "Rovyl",
-      "backgroundColor": "#101014",
-      "showNameOnTiles": false,
-      "languages": [
-        "en-US"
-      ]
     }
   },
   "engines": {
-    "node": ">=20"
+    "node": "^20.19.0 || >=22.12.0"
   },
   "license": "GPL-3.0-or-later"
 }

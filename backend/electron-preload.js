@@ -5,20 +5,9 @@ contextBridge.exposeInMainWorld("electron", {
     ipcRenderer.send("execute-command", command, commandType, options),
   hideWindow: () => ipcRenderer.send("hide-window"),
   showWindow: () => ipcRenderer.send("show-window"),
-  /** Superfícies com campo de texto (gate da licença) precisam do HWND em foreground para receber teclas. */
+  /** Superfícies com campo de texto precisam do HWND em foreground para receber teclas. */
   requestKeyboardFocus: () => ipcRenderer.send("request-keyboard-focus"),
   getAppVersion: () => ipcRenderer.invoke("get-app-version"),
-  /** "store" quando a app corre a partir do pacote MSIX — as linhas de atualização somem. */
-  getBuildChannel: () => ipcRenderer.invoke("get-build-channel"),
-  getUpdateState: () => ipcRenderer.invoke("get-update-state"),
-  checkForUpdates: () => ipcRenderer.invoke("check-for-updates"),
-  installUpdateNow: () => ipcRenderer.send("install-update-now"),
-  /** Estado da atualização automática — alimenta o selo no hub do radial. */
-  onUpdateState: (callback) => {
-    const listener = (_event, payload) => callback(payload);
-    ipcRenderer.on("update-state", listener);
-    return () => ipcRenderer.removeListener("update-state", listener);
-  },
   /** Distingue arranque com o Windows de abertura manual — ver o adiamento da varredura. */
   wasOpenedAtLogin: () => ipcRenderer.invoke("was-opened-at-login"),
   appSupportsRecents: (appName, appCommand) => ipcRenderer.invoke("app-supports-recents", appName, appCommand),
@@ -118,8 +107,6 @@ contextBridge.exposeInMainWorld("electron", {
   setLoginItemSettings: (settings) =>
     ipcRenderer.send("set-login-item-settings", settings),
   getFileIcon: (path) => ipcRenderer.invoke("get-file-icon", path),
-  getWebsiteFaviconDataUrl: (pageUrl) =>
-    ipcRenderer.invoke("get-website-favicon-data-url", pageUrl),
   onWindowState: (callback) => {
     const listener = (event, state) => callback(state);
     ipcRenderer.on("window-state", listener);
@@ -140,7 +127,6 @@ contextBridge.exposeInMainWorld("electron", {
     ipcRenderer.invoke("remove-managed-custom-icon", urlOrPath),
   getInstalledApps: (forceRefresh = false) =>
     ipcRenderer.invoke("get-installed-apps", forceRefresh),
-  getOnboardingApps: () => ipcRenderer.invoke("get-onboarding-apps"),
   getStartupApps: () => ipcRenderer.invoke("get-startup-apps"),
   onExecutionError: (callback) => {
     const listener = (event, errorMsg) => callback(errorMsg);
@@ -202,20 +188,7 @@ contextBridge.exposeInMainWorld("electron", {
     ipcRenderer.invoke("get-app-recents", appName, appCommand),
   setWorkspaceShortcutsState: (isOpen, workspaceSwitchMode) =>
     ipcRenderer.send("set-workspace-shortcuts", isOpen, workspaceSwitchMode),
-  startGoogleAuth: () => ipcRenderer.send("start-google-auth"),
-  onGoogleAuthSuccess: (callback) => {
-    const listener = (event, user) => callback(user);
-    ipcRenderer.on("google-auth-success", listener);
-    return () => ipcRenderer.removeListener("google-auth-success", listener);
-  },
-  onGoogleAuthError: (callback) => {
-    const listener = (event, payload) => callback(payload);
-    ipcRenderer.on("google-auth-error", listener);
-    return () => ipcRenderer.removeListener("google-auth-error", listener);
-  },
   savePersistenceLog: (message) => ipcRenderer.send("save-persistence-log", message),
-  /** Opens http(s) URLs in the system default browser (not an Electron window). */
-  openExternalUrl: (url) => ipcRenderer.invoke("open-external-url", url),
   openSystemUninstall: () => ipcRenderer.invoke("open-system-uninstall"),
 });
 

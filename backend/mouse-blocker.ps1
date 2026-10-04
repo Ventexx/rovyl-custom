@@ -81,6 +81,10 @@ public static class ZenithRadialMouseBlocker {
     private static readonly AutoResetEvent OutboundSignal = new AutoResetEvent(false);
     private static readonly LowLevelMouseProc Callback = HookCallback;
     private static IntPtr Hook = IntPtr.Zero;
+    // -1 allows any foreground window; 0 pauses; otherwise only this HWND is approved.
+    private static long AllowedForeground = -1;
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
     /**
      * Handle do modulo, resolvido uma unica vez. `Process.MainModule` enumera os modulos do
      * processo -- barato uma vez no arranque, caro a cada 2 s no `ReArmHook`, e nesta thread
@@ -112,6 +116,8 @@ public static class ZenithRadialMouseBlocker {
      * `GetAsyncKeyState`, portanto quem engole tem de ser tambem quem deteta.
      */
     private static volatile int TriggerButton;      // 0 = desligado, 4 = meio, 5 = X1, 6 = X2
+    private static bool TriggerPressed;
+    private static int LastHeartbeat = Environment.TickCount;
     private static volatile bool TriggerHoldMode;   // no modo "click" nunca ha clique a devolver
     private static volatile int TriggerThreshold;   // px; abaixo disto o gesto nao mirou nada
     private static int DownX, DownY;
@@ -175,7 +181,16 @@ public static class ZenithRadialMouseBlocker {
          */
         if (message == WM_MOUSEMOVE) return CallNextHookEx(Hook, nCode, wParam, lParam);
 
+        // Fail open if the parent freezes. Do not keep swallowing desktop input.
+        if (unchecked(Environment.TickCount - LastHeartbeat) > 2000) {
+            TriggerPressed = false;
+            return CallNextHookEx(Hook, nCode, wParam, lParam);
+        }
+
         int trigger = TriggerButton;
+        long allowed = Interlocked.Read(ref AllowedForeground);
+        // Finish a captured press even if opening the wheel changes foreground focus.
+        if (!TriggerPressed && (allowed == 0 || (allowed != -1 && GetForegroundWindow().ToInt64() != allowed))) trigger = 0;
         bool blocking = Blocking;
         /** Sem gatilho armado nem bloqueio ativo nao ha decisao nenhuma a tomar. */
         if (trigger == 0 && !blocking) return CallNextHookEx(Hook, nCode, wParam, lParam);
@@ -197,6 +212,7 @@ public static class ZenithRadialMouseBlocker {
             uint mouseData = (uint)Marshal.ReadInt32(lParam, OffsetMouseData);
             int which = TriggerFor(message, mouseData, out isDown);
             if (which == trigger) {
+                TriggerPressed = isDown;
                 if (isDown) {
                     DownX = px;
                     DownY = py;
@@ -222,12 +238,8 @@ public static class ZenithRadialMouseBlocker {
             }
         }
 
-        if (blocking && IsBlockedMessage(message)) {
-            bool insideAllowed = px >= Left && px < Right && py >= Top && py < Bottom;
-            bool insideMonitor = px >= MonitorLeft && px < MonitorRight &&
-                                 py >= MonitorTop && py < MonitorBottom;
-            if (insideMonitor && !insideAllowed) return new IntPtr(1);
-        }
+        // Only the explicitly selected trigger may be consumed. All other buttons
+        // and scrolling always continue to Windows, regardless of overlay state.
 
         return CallNextHookEx(Hook, nCode, wParam, lParam);
     }
@@ -295,7 +307,11 @@ public static class ZenithRadialMouseBlocker {
         var parts = command.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length == 0) return;
 
-        if (parts.Length == 9 && parts[0] == "BLOCK") {
+        if (parts.Length == 2 && parts[0] == "CONTEXT") {
+            LastHeartbeat = Environment.TickCount;
+            long allowed;
+            if (long.TryParse(parts[1], out allowed)) Interlocked.Exchange(ref AllowedForeground, allowed);
+        } else if (parts.Length == 9 && parts[0] == "BLOCK") {
             int x, y, width, height, monitorX, monitorY, monitorWidth, monitorHeight;
             if (int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out x) &&
                 int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out y) &&
@@ -317,6 +333,7 @@ public static class ZenithRadialMouseBlocker {
             // TRIGGER <vk 4|5|6> <hold|click> <threshold px>   |   TRIGGER OFF
             if (parts.Length >= 2 && parts[1] == "OFF") {
                 TriggerButton = 0;
+                TriggerPressed = false;
                 ReleaseHookIfIdle();
                 Emit("TRIGGER_OFF");
                 return;

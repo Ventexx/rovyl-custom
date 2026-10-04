@@ -13,7 +13,7 @@ import {
 import { Minus, X, Maximize, Square, AlertTriangle, ArrowLeft, ArrowRight, PanelLeftClose } from 'lucide-react';
 import type { Language } from './translations';
 import { motion, AnimatePresence } from 'framer-motion';
-import { isLikelyWebUrl, resolveWebsiteIconFields } from './siteFavicon';
+import { isLikelyWebUrl } from './localIcons';
 
 /** Settings is the largest UI surface; radial-only sessions never need to parse or retain it. */
 const PrecisionSettings = React.lazy(() =>
@@ -175,16 +175,6 @@ function sanitizeFullPersistenceForDisk(d: {
 export default function App() {
   /* zenith-verify:radial-handshake-renderer — overlays/handshake radial; ver scripts/verify-radial-windowing.mjs */
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-  /** Atualização descarregada e à espera de reinício — assinalada com um selo no hub do radial. */
-  const [updateReady, setUpdateReady] = useState(false);
-
-  useEffect(() => {
-    const off = window.electron?.onUpdateState?.((payload) => {
-      setUpdateReady(payload?.state === 'ready');
-    });
-    return () => { off?.(); };
-  }, []);
-
   /** Esconde dashboard/definições antes do `await applyWindowSize('fullscreen')` — sem isto, ao restaurar da bandeja aparece um frame da última UI. */
   const [radialOpenAwaitingFullscreen, setRadialOpenAwaitingFullscreen] = useState(false);
   /**
@@ -210,6 +200,9 @@ export default function App() {
   /** Main: `prepare-radial-show` — pintar antes de `show()` para não expor textura antiga (minimizado/dashboard). */
   const [radialPreShowSolidCover, setRadialPreShowSolidCover] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(true);
+  const [saveStatus, setSaveStatus] = useState<'saving' | 'saved' | 'error'>('saving');
+  const [testWorkspace, setTestWorkspace] = useState<Workspace | null>(null);
+  const testWorkspaceRef = useRef<Workspace | null>(null);
   /** Two-paint transparent close phase so DWM never caches Settings as the idle HWND texture. */
   const [panelNeutralizingClose, setPanelNeutralizingClose] = useState(false);
   const isDashboardOpenRef = useRef(false);
@@ -261,31 +254,8 @@ export default function App() {
    */
   const openDashboardAfterDiscoveryRef = useRef(false);
 
-  // User / Auth State (Defaults to null)
+  // Preserve legacy profile metadata in backups; no account or sign-in functionality.
   const [user, setUser] = useState<UserProfile | null>(null);
-  const userRef = useRef<UserProfile | null>(null);
-  userRef.current = user;
-
-  /**
-   * Canal da Store. A Microsoft cobra antes de deixar instalar o pacote e so entrega o MSIX a
-   * quem comprou, portanto pedir chave de licenca a seguir seria cobrar duas vezes.
-   *
-   * Isto e deliberadamente um sinalizador DERIVADO e nao um `user` sintetico: o `user` vai para
-   * disco em `sanitizeFullPersistenceForDisk`, e gravar `isPremium: true` la dentro faria com que
-   * copiar o ficheiro de persistencia para uma instalacao do canal direto a desbloqueasse.
-   */
-  const [isStoreChannel, setIsStoreChannel] = useState(false);
-  const isStoreChannelRef = useRef(false);
-  isStoreChannelRef.current = isStoreChannel;
-
-  useEffect(() => {
-    let cancelled = false;
-    void window.electron?.getBuildChannel?.().then((channel) => {
-      if (!cancelled) setIsStoreChannel(channel === 'store');
-    }).catch(() => undefined);
-    return () => { cancelled = true; };
-  }, []);
-
   const [menuPosition, setMenuPosition] = useState<Coordinates>({ x: 0, y: 0 });
   /** Remonta a árvore visual a cada abertura; nenhuma geometria/transition da sessão anterior sobrevive. */
   const [radialMountKey, setRadialMountKey] = useState(0);
@@ -632,7 +602,7 @@ export default function App() {
   // ICON HEALING: Automatically re-fetch missing native icons
   useEffect(() => {
     if (!isLoaded) return;
-    if (!window.electron?.getFileIcon && !window.electron?.getWebsiteFaviconDataUrl) return;
+    if (!window.electron?.getFileIcon) return;
 
     let cancelled = false;
     const healingKey = (item: AppItem) =>
@@ -654,13 +624,7 @@ export default function App() {
       const traverse = (list: AppItem[]) => {
         list.forEach(item => {
           const web = isWebShortcutItem(item);
-          const iconStr = String(item.customIconUrl ?? '').trim();
-          if (web && item.command?.trim()) {
-            // Falta ícone ou só URL remota (renderer não mostra → migrar para data URL)
-            if ((!iconStr || isRemoteIconUrl(item.customIconUrl)) && canAttempt(item)) {
-              missing.push(item);
-            }
-          } else if (
+          if (
             item.iconSource === 'native' &&
             !item.customIconUrl &&
             item.command &&
@@ -697,37 +661,7 @@ export default function App() {
             chunk.map(async (item) => {
               let newItem = { ...item };
               const web = isWebShortcutItem(item);
-              const iconStr = String(item.customIconUrl ?? '').trim();
-              const webNeedsIcon =
-                web &&
-                item.command?.trim() &&
-                (!iconStr || isRemoteIconUrl(item.customIconUrl)) &&
-                canAttempt(item);
-              if (webNeedsIcon) {
-                rememberAttempt(item);
-                let iconFields: Partial<AppItem> | null = null;
-                try {
-                  iconFields = await resolveWebsiteIconFields(item.command!.trim());
-                } catch (e) {
-                  iconFields = null;
-                }
-                const url = iconFields?.customIconUrl;
-                if (url?.startsWith('data:')) {
-                  newItem = { ...newItem, ...iconFields };
-                  hasUpdates = true;
-                } else if (!iconStr && url) {
-                  newItem = { ...newItem, ...iconFields };
-                  hasUpdates = true;
-                } else {
-                  /**
-                   * Favicon é rede: no arranque a ligação pode ainda não estar de pé, e uma falha
-                   * assim ficava marcada como tentativa gasta — o atalho só ganhava ícone na
-                   * sessão seguinte. Mesma regra do caminho nativo: falhar devolve a vez.
-                   */
-                  iconHealingAttemptedRef.current.delete(healingKey(item));
-                  healingHadFailuresRef.current = true;
-                }
-              } else if (
+              if (
                 item.iconSource === 'native' &&
                 !item.customIconUrl &&
                 item.command &&
@@ -1330,6 +1264,8 @@ export default function App() {
     config.gameMode?.mode,
     config.gameMode?.blockedApps,
     config.gameMode?.autoDetectGames,
+    config.gameMode?.pauseFullscreen,
+    config.gameMode?.pauseSelected,
   ]);
 
   /** Pré-carrega apenas os executáveis marcados; não inicia apps nem abre janelas escondidas. */
@@ -1351,6 +1287,8 @@ export default function App() {
   // 2. UNIFIED SAVE EFFECT: Sync to Main Process and LocalStorage (disk + LS mirror survives reboot)
   useEffect(() => {
     if (!isLoaded) return;
+    let cancelled = false;
+    setSaveStatus('saving');
 
     const timer = setTimeout(() => {
       if (startMenuScanPersistenceHoldRef.current) {
@@ -1373,26 +1311,33 @@ export default function App() {
         // conteúdo customizado: salvar mesmo com hold ativo
       }
       const fullData = sanitizeFullPersistenceForDisk({ user, apps, config });
-      if (!fullData) return;
+      if (!fullData) { setSaveStatus('error'); return; }
 
-      localStorage.setItem('zenith_user', JSON.stringify(user));
-      localStorage.setItem('zenith_apps', JSON.stringify(apps));
-      localStorage.setItem('zenith_config', JSON.stringify(config));
+      try {
+        localStorage.setItem('zenith_user', JSON.stringify(user));
+        localStorage.setItem('zenith_apps', JSON.stringify(apps));
+        localStorage.setItem('zenith_config', JSON.stringify(config));
+      } catch {
+        // A full browser cache must not prevent the authoritative disk save.
+      }
 
       if (!persistenceSaveBlockedRef.current && window.electron?.saveFullConfig) {
         const wsCount = fullData.config?.workspaces?.length ?? 0;
         const mainApps = (fullData.config?.workspaces?.[0]?.apps?.length ?? 0);
         void window.electron.saveFullConfig(fullData).then((r) => {
+          if (!cancelled) setSaveStatus(r?.ok ? 'saved' : 'error');
           if (r && !r.ok) {
             window.electron?.savePersistenceLog?.(
               `saveFullConfig failed: ${r.error || 'unknown'} | ws=${wsCount} mainApps=${mainApps}`,
             );
           }
-        });
+        }).catch(() => { if (!cancelled) setSaveStatus('error'); });
+      } else {
+        setSaveStatus('error');
       }
     }, 450);
 
-    return () => clearTimeout(timer);
+    return () => { cancelled = true; clearTimeout(timer); };
   }, [user, apps, config, isLoaded]);
 
   /** Flush before exit / background so the last edit is not lost (debounce skipped). */
@@ -1494,32 +1439,6 @@ export default function App() {
 
   const lastMiddleClickTime = useRef<number>(0);
   const isHolding = useRef(false);
-
-  // Listen for Google Auth Success
-  useEffect(() => {
-    if (window.electron?.onGoogleAuthSuccess) {
-      return window.electron.onGoogleAuthSuccess((authData: any) => {
-        const newUser: UserProfile = {
-          id: authData.isAdmin ? 'admin-001' : crypto.randomUUID(),
-          name: authData.name,
-          email: authData.email,
-          isPremium: authData.isPremium,
-          isAdmin: authData.isAdmin,
-          planTier: authData.planTier ?? (authData.isPremium ? 'pro' : 'free'),
-          trialEndsAt: undefined,
-          avatarUrl: authData.avatarUrl || `https://ui-avatars.com/api/?name=${encodeURIComponent(authData.name)}&background=0D8ABC&color=fff`,
-        };
-        flushSync(() => {
-          setUser(newUser);
-          setPanelChromeDismissedForIsland(false);
-          setIsDashboardOpen(false);
-          setIsSettingsOpen(true);
-        });
-      });
-    }
-  }, []);
-
-
 
   // Window State Management (Interactable vs Passive)
   // TRACK WINDOW STATE TO PREVENT REDUNDANT IPC CALLS (Reduces Lag/Flicker)
@@ -1672,8 +1591,7 @@ export default function App() {
      * alargou a janela para o cobrir — e continuamos a desenhá-lo exatamente no mesmo sítio.
      * Quando é o renderer que redimensiona, o rect tem de ser lido ANTES do resize.
      */
-    const keepPanel =
-      opts?.keepPanel ?? (panelSurfaceOpen && isDesktopModeRef.current);
+    const keepPanel = Boolean(opts?.keepPanel || panelSurfaceOpen);
     /**
      * Com posição fixa o main não toca nos bounds: o painel continua a ser a janela inteira e
      * não há nada para reposicionar — é esse o caminho sem flash. Só quando a janela é alargada
@@ -2370,6 +2288,12 @@ export default function App() {
     setPanelOverlayClientRect(null);
     isHolding.current = false;
 
+    if (testWorkspaceRef.current) {
+      testWorkspaceRef.current = null;
+      setTestWorkspace(null);
+      return;
+    }
+
     if (!selectedId && isDesktopMode && !panelSurfaceOpen) {
       window.electron?.setWindowSize('small', windowCenterScreenPoint());
       return;
@@ -2429,43 +2353,6 @@ export default function App() {
 
 
 
-
-  {/* Auth Functions */ }
-  const handleLogin = (provider: 'google' | 'email') => {
-    /** Google: Electron opens zenithos.online/auth?client=desktop and bridges id_token from localhost:3892. */
-    if (provider === 'google' && window.electron?.startGoogleAuth) {
-      window.electron.startGoogleAuth();
-      return;
-    }
-
-    window.electron?.openExternalUrl?.('https://zenithos.online/#download');
-  };
-
-
-  /**
-   * nesta máquina volta a ocupar o mesmo lugar em vez de gastar um dispositivo novo.
-   */
-  /**
-   * A roda trancada não pede a chave: encaminha para o cartão da licença nas definições, que é
-   * onde o teclado já funciona sem depender do roubo de foreground para a janela do radial.
-   */
-
-
-  /** Objeto estável: o memo das secções das definições depende dele. */
-
-
-  const handleLogout = () => {
-    flushSync(() => {
-      setUser(null);
-      setPanelChromeDismissedForIsland(false);
-      setIsDashboardOpen(false);
-      setIsSettingsOpen(true);
-    });
-  };
-
-  const handleUserProfileUpdate = useCallback((patch: Partial<UserProfile>) => {
-    setUser((u) => (u ? { ...u, ...patch } : null));
-  }, []);
 
   /** Menu-only slice of config: stable when unrelated settings (e.g. widget opacities) change — keeps RadialMenu from re-rendering the full wheel. */
   /**
@@ -2697,9 +2584,9 @@ export default function App() {
         {/* DELETED: Removed redundant background to allow RadialMenu to handle it exclusively */}
 
         {/* WELCOME SCREEN / DASHBOARD — AnimatePresence sync evita buraco só com fundo entre dashboard e definições (DWM). */}
-        {panelContentVisible && (
+        {isLoaded && (
           <AnimatePresence mode="sync">
-            {isSettingsOpen && panelSurfaceOpen && (
+            {(
               <motion.div
                 key="settings-page"
                 initial={{ opacity: 0, x: 20, filter: 'blur(10px)' }}
@@ -2707,11 +2594,19 @@ export default function App() {
                 exit={{ opacity: 0, x: 20, filter: 'blur(10px)' }}
                 transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
                 className="absolute inset-x-0 bottom-0 top-[var(--zenith-title-bar-h)] z-20"
+                style={{ visibility: isSettingsOpen && panelSurfaceOpen && panelContentVisible ? 'visible' : 'hidden' }}
               >
                 <React.Suspense
                   fallback={<div className="absolute inset-0 bg-[#08090b]" aria-hidden />}
                 >
                 <PrecisionSettings
+                  saveStatus={saveStatus}
+                  isTestingWorkspace={!!testWorkspace || isMenuOpen || radialOpenAwaitingFullscreen}
+                  onTestWorkspace={(workspace) => {
+                    testWorkspaceRef.current = workspace;
+                    setTestWorkspace(workspace);
+                    void openMenuRef.current(window.innerWidth / 2, window.innerHeight / 2, 'shortcut', 'client', { keepPanel: true });
+                  }}
                   isOpen={isSettingsOpen}
                   isPage={true}
                   onClose={handleClosePanelToBackground}
@@ -2781,12 +2676,11 @@ export default function App() {
             position={menuPosition}
             viewportSize={radialClientSize}
             onClose={handleMenuClose}
-            apps={radialApps}
-            config={radialMenuConfig}
+            apps={testWorkspace?.apps ?? radialApps}
+            config={testWorkspace ? { ...radialMenuConfig, workspaceSwitchMode: 'hotkeys', workspaces: [testWorkspace], activeWorkspaceIndex: 0 } : radialMenuConfig}
             triggerSource={triggerSource}
-            updateReady={updateReady}
-            onWorkspaceSwitch={handleWorkspaceSwitch}
-            currentWorkspace={radialCurrentWorkspace}
+            onWorkspaceSwitch={testWorkspace ? undefined : handleWorkspaceSwitch}
+            currentWorkspace={testWorkspace ?? radialCurrentWorkspace}
             animationReady={
               radialPendingPaintToken === null ||
               radialNativeRevealToken === radialPendingPaintToken
@@ -2795,6 +2689,10 @@ export default function App() {
         )}
 
         <Toast app={lastLaunched} />
+        {testWorkspace && isMenuOpen && <div data-zenith-radial-modal="true" onMouseDown={event => event.stopPropagation()} onMouseUp={event => event.stopPropagation()} className="fixed top-12 left-1/2 -translate-x-1/2 z-[99999] rounded-xl bg-neutral-900 text-white px-5 py-3 flex items-center gap-4 text-sm" role="status">
+          <span>Testing {testWorkspace.name} · Select an item or press Escape. Apps won’t launch.</span>
+          <button type="button" onClick={() => handleMenuClose(null)}>Back to editor</button>
+        </div>}
         
         <AnimatePresence>
           {executionError && (

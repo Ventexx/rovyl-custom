@@ -1,5 +1,4 @@
 import React from 'react';
-import { Cloud } from 'lucide-react';
 import { CLOCK_HUD_POSITIONS, ClockHudPosition, UIConfig } from '../types';
 
 export type ClockHudRegion = ClockHudPosition;
@@ -75,23 +74,16 @@ const hudPillClass =
 interface HudStatusStripProps {
   align: HudAlign;
   showBattery: boolean;
-  showWeather: boolean;
-  performanceMode: boolean;
   batteryLevel: number | null;
-  weather: { temp: number; condition: string } | null;
 }
 
 const HudStatusStrip: React.FC<HudStatusStripProps> = ({
   align,
   showBattery,
-  showWeather,
-  performanceMode,
   batteryLevel,
-  weather,
 }) => {
   const showBatteryChip = showBattery && batteryLevel !== null;
-  const showWeatherChip = showWeather && !performanceMode && !!weather;
-  if (!showBatteryChip && !showWeatherChip) return null;
+  if (!showBatteryChip) return null;
 
   return (
     <div
@@ -117,51 +109,30 @@ const HudStatusStrip: React.FC<HudStatusStripProps> = ({
         </div>
       )}
 
-      {showWeatherChip && (
-        <div className={`${hudPillClass} max-w-[min(100%,14rem)]`}>
-          <Cloud className="h-3.5 w-3.5 shrink-0 text-white/45" strokeWidth={1.75} aria-hidden />
-          <span className="truncate text-[11px] font-semibold tabular-nums tracking-tight text-white/85">
-            {weather!.temp}°
-          </span>
-          {weather!.condition && weather!.condition !== '---' && (
-            <>
-              <span className="text-white/25" aria-hidden>
-                ·
-              </span>
-              <span className="truncate text-[10px] font-medium uppercase tracking-wider text-white/45">
-                {weather!.condition}
-              </span>
-            </>
-          )}
-        </div>
-      )}
     </div>
   );
 };
 
 /**
- * Sobreposição do radial: só bateria/clima (desligados por defeito). Relógio, data e chip do workspace
+ * Sobreposição do radial: só bateria (desligados por defeito). Relógio, data e chip do workspace
  * foram removidos — a janela do radial mostra apenas a roda, e nada é desenhado fora dela.
  */
 export interface RadialHudProps {
   isOpen: boolean;
   config: UIConfig;
   batteryLevel: number | null;
-  weather: { temp: number; condition: string } | null;
 }
 
 export const RadialHud: React.FC<RadialHudProps> = ({
   isOpen,
   config,
   batteryLevel,
-  weather,
 }) => {
   const region = resolveHudRegion(config.clockPosition);
   const { isBottom, align, shellClass, innerClass } = getHudLayout(region);
 
   const showStatus =
-    (config.showBattery && batteryLevel !== null) ||
-    (config.showWeather && !config.performanceMode && !!weather);
+    config.showBattery && batteryLevel !== null;
   if (!showStatus) return null;
 
   const enterY = isBottom ? 10 : -10;
@@ -180,10 +151,7 @@ export const RadialHud: React.FC<RadialHudProps> = ({
         <HudStatusStrip
           align={align}
           showBattery={config.showBattery}
-          showWeather={config.showWeather}
-          performanceMode={config.performanceMode}
           batteryLevel={batteryLevel}
-          weather={weather}
         />
       </div>
     </div>

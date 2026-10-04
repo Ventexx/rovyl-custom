@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useState, useRef } from 'react';
 import { Coordinates, AppItem, UIConfig, Workspace } from '../types';
 import { getIcon } from '../iconMap';
+import { wheelAppearance } from '../utils/wheelAppearance';
 import { CornerUpLeft } from 'lucide-react';
 import { SmartIcon } from './SmartIcon';
 import { RovylLogo } from './RovylLogo';
@@ -11,13 +12,6 @@ import {
   isWorkspacePickItem,
   parseWorkspacePickIndex,
 } from '../utils/workspaceRadial';
-
-// PERF FIX #3: Module-level weather cache — persists across menu open/close cycles
-// Prevents a new HTTP fetch on every menu open; refreshes only after 10 minutes or location change
-const weatherCache: { data: { temp: number; condition: string } | null; lastFetch: number; location: string } = {
-  data: null, lastFetch: 0, location: ''
-};
-const WEATHER_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 /** Subconjunto da API Battery — evita `BatteryManager` quando o TS/DOM local não o expõe. */
 type ZenithBattery = {
@@ -113,8 +107,7 @@ function applyOpenTerminalForRecents(recents: AppItem[], parent: AppItem): AppIt
 }
 
 /**
- * Calibração da roda. Extraída para módulo porque o gate da licença desenha a MESMA roda
- * (bloqueada): raio, tamanho de tile e respiração têm de vir daqui, nunca de constantes paralelas.
+ * Calibração partilhada da roda: raio, tamanho de tile e respiração.
  */
 export function computeRadialLayout({
   numberOfApps,
@@ -172,14 +165,14 @@ export function computeRadialLayout({
 
 /**
  * Escurecimento do radial: poça radial em smoothstep de 9 stops (2 stops tão largos fazem
- * banding a 8-bit, e banding lê-se como borrão). Partilhado com o gate da licença.
+ * banding a 8-bit, e banding lê-se como borrão).
  */
 export function radialScrimGradient(
   position: { x: number; y: number },
   backdropOpacity: number,
   backdropRadius: number,
 ): string {
-  const scrimPeak = 0.22 + backdropOpacity * 0.3;
+  const scrimPeak = Math.max(0, Math.min(0.8, backdropOpacity));
   const scrimRadius = Math.round(backdropRadius * 2);
   const stops = [0, 0.12, 0.25, 0.38, 0.5, 0.62, 0.75, 0.88, 1]
     .map((t) => {
@@ -203,8 +196,6 @@ interface RadialMenuProps {
   currentWorkspace?: Workspace;
   /** False enquanto o HWND oculto recebe o primeiro paint transparente. */
   animationReady?: boolean;
-  /** Atualização descarregada e à espera de reinício — selo no hub. */
-  updateReady?: boolean;
 }
 
 interface RadialMenuItemProps {
@@ -218,6 +209,8 @@ interface RadialMenuItemProps {
   totalApps: number;
   /** Narrow style props so parent config identity does not bust memo for every App re-render. */
   backdropOpacity: number;
+  labelSize: number;
+  tileRoundness: number;
   hoverColor: string;
   showLabels: boolean;
   alwaysShowAppLabels: boolean;
@@ -296,6 +289,8 @@ const RadialMenuItem = React.memo(({
   actualIconSize,
   totalApps,
   backdropOpacity,
+  labelSize,
+  tileRoundness,
   hoverColor,
   showLabels,
   alwaysShowAppLabels,
@@ -405,6 +400,7 @@ const RadialMenuItem = React.memo(({
              * que bordas — os cantos ficam serrilhados sobre uma janela transparente. A máscara só
              * existe para cortar ícones rasterizados, portanto só se liga quando há um.
              */
+            data-wheel-tile="true"
             className={`w-full h-full rounded-[18px] flex items-center justify-center transition-[background-color,border-color,box-shadow] duration-150 relative ${hasRasterIcon ? 'overflow-hidden' : ''}`}
             style={{
               /**
@@ -420,6 +416,7 @@ const RadialMenuItem = React.memo(({
                * fica irregular, com pontos mais claros e outros a desaparecer. A 0.985 a diferença
                * visual para opaco é nula, mas o custo na aresta não é.
                */
+              borderRadius: tileRoundness,
               backgroundColor: isActive
                 ? hoverColor
                 : `rgb(${12 + Math.round(backdropOpacity * 10)}, ${12 + Math.round(backdropOpacity * 10)}, ${12 + Math.round(backdropOpacity * 10)})`,
@@ -514,9 +511,11 @@ const RadialMenuItem = React.memo(({
             >
               <span
                 className="text-[12px] leading-none"
+                data-wheel-label="true"
                 style={{
                   color: isActive ? activeForeground : 'rgba(255,255,255,0.7)',
                   fontFamily: 'var(--font-radial)',
+                  fontSize: labelSize,
                   fontWeight: 500,
                   letterSpacing: '-0.005em',
                 }}
@@ -555,7 +554,6 @@ const RadialMenuInner: React.FC<RadialMenuProps> = ({
   onWorkspaceSwitch,
   currentWorkspace,
   animationReady = true,
-  updateReady = false,
 }) => {
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const [isCenterActive, setIsCenterActive] = useState(false);
@@ -1354,14 +1352,12 @@ const RadialMenuInner: React.FC<RadialMenuProps> = ({
   }, [isOpen, triggerSource, onWorkspaceSwitch]);
 
   const [batteryLevel, setBatteryLevel] = useState<number | null>(null);
-  const [weather, setWeather] = useState<{ temp: number; condition: string } | null>(null);
 
-  // Battery & Weather Logic
+  // Local battery status, only while the wheel is open.
   useEffect(() => {
     if (!isOpen) return;
 
     let cancelled = false;
-    const weatherAbort = new AbortController();
     let batteryObj: ZenithBattery | null = null;
     const onBatteryLevel = () => {
       if (cancelled || !batteryObj) return;
@@ -1378,43 +1374,8 @@ const RadialMenuInner: React.FC<RadialMenuProps> = ({
       });
     }
 
-    // Real Weather Logic (wttr.in) with 10-minute cache
-    if (config.showWeather) {
-      const loc = config.weatherLocation || '';
-      const now = Date.now();
-      const cacheValid = weatherCache.data &&
-        weatherCache.location === loc &&
-        (now - weatherCache.lastFetch) < WEATHER_TTL_MS;
-
-      if (cacheValid) {
-        setWeather(weatherCache.data);
-      } else {
-        const fetchWeather = async () => {
-          try {
-            const response = await fetch(`https://wttr.in/${encodeURIComponent(loc)}?format=j1`, {
-              signal: weatherAbort.signal,
-            });
-            if (!response.ok) throw new Error('Weather fetch failed');
-            const data = await response.json();
-            const current = data.current_condition[0];
-            const result = { temp: parseInt(current.temp_C), condition: current.weatherDesc[0].value };
-            weatherCache.data = result;
-            weatherCache.lastFetch = Date.now();
-            weatherCache.location = loc;
-            if (!cancelled) setWeather(result);
-          } catch (err) {
-            if (weatherAbort.signal.aborted) return;
-            console.error("Failed to fetch weather:", err);
-            if (!cancelled && !weatherCache.data) setWeather({ temp: 0, condition: '---' });
-          }
-        };
-        fetchWeather();
-      }
-    }
-
     return () => {
       cancelled = true;
-      weatherAbort.abort();
       if (batteryObj) {
         try {
           batteryObj.removeEventListener('levelchange', onBatteryLevel);
@@ -1423,7 +1384,7 @@ const RadialMenuInner: React.FC<RadialMenuProps> = ({
         }
       }
     };
-  }, [isOpen, config.showBattery, config.showWeather, config.weatherLocation]);
+  }, [isOpen, config.showBattery]);
 
   const handleAppClick = React.useCallback((app: AppItem) => {
     const cfg = configRef.current;
@@ -1503,7 +1464,8 @@ const RadialMenuInner: React.FC<RadialMenuProps> = ({
    * O fundo visual, porém, acompanha apenas a roda (ícones + uma pequena margem) e usa a posição real
    * do menu como centro — importante quando o radial abre perto da borda do monitor.
    */
-  const bo = config.backdropOpacity;
+  const appearance = wheelAppearance(config);
+  const bo = appearance.dimming;
 
 
   const backdropRadius = Math.ceil(
@@ -1554,13 +1516,14 @@ const RadialMenuInner: React.FC<RadialMenuProps> = ({
             isOpen={isOpen && bloom}
             config={config}
             batteryLevel={batteryLevel}
-            weather={weather}
           />
 
           {/* Menu Container */}
           <div
             ref={menuRef}
+            data-wheel-content="true"
             style={{
+              opacity: appearance.opacity,
               left: Math.round(position.x),
               top: Math.round(position.y),
               width: 0,
@@ -1631,45 +1594,6 @@ const RadialMenuInner: React.FC<RadialMenuProps> = ({
               onMouseUp={(e) => e.stopPropagation()}
             >
               {/*
-                Selo de atualização. Informativo, nunca clicável: o centro é o gesto de fechar, e
-                um alvo colado a ele reintroduzia a classe de bugs de cliques trocados que custou
-                uma sessão inteira a resolver. A ação vive nas Definições.
-
-                A seta é desenhada, não é um glifo tipográfico: um glifo traz espaçamento lateral e
-                linha de base próprios, e num círculo de 24px isso chega para o pôr torto. Os
-                pontos abaixo saem dos limites da TINTA — traço de 1.7 com pontas redondas cresce
-                0.85 além de cada extremo — e não da geometria nua.
-              */}
-              {updateReady && (
-                <span
-                  className="absolute pointer-events-none"
-                  style={{
-                    top: -Math.round(hubDiameter * 0.03),
-                    right: -Math.round(hubDiameter * 0.03),
-                    width: Math.round(hubDiameter * 0.32),
-                    height: Math.round(hubDiameter * 0.32),
-                    borderRadius: '50%',
-                    background: '#0A84FF',
-                    /** Anel na cor do fundo: separa do hub sem introduzir contorno novo. */
-                    border: `${Math.max(2, Math.round(hubDiameter * 0.026))}px solid #0a0a0a`,
-                    boxSizing: 'border-box',
-                    zIndex: 40,
-                  }}
-                  aria-label="Update ready"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" style={{ display: 'block', width: '100%', height: '100%' }}>
-                    <path
-                      d="M12 7.2V13.6M8.9 10.5L12 13.6l3.1-3.1M7.7 16.7h8.6"
-                      stroke="#fff"
-                      strokeWidth={1.7}
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </span>
-              )}
-
-              {/*
                 O anel é um `<circle>` SVG, não uma `border` CSS.
                 São dois rasterizadores diferentes: a borda de uma caixa com `border-radius` é
                 desenhada como quatro arcos de canto costurados à volta de um retângulo, e é nessas
@@ -1728,7 +1652,8 @@ const RadialMenuInner: React.FC<RadialMenuProps> = ({
             </div>
 
             {/* Context pill: where you are in the wheel + the gesture that goes back. */}
-            <div
+            {config.showLocationLabel !== false && <div
+              data-wheel-location="true"
               className="zn-radial-pill absolute left-0 top-0 pointer-events-none z-30"
               style={{
                 ['--zn-tf' as string]: `translate(-50%, 0) translate3d(0, ${Math.round(
@@ -1767,6 +1692,7 @@ const RadialMenuInner: React.FC<RadialMenuProps> = ({
               </div>
             </div>
 
+            }
             {/* App Icons — a troca entre níveis é o próprio bloom (ver efeito `bloom`). */}
             {currentLevelApps.map((app, index) => {
                 const isActive = index === activeIndex;
@@ -1790,6 +1716,8 @@ const RadialMenuInner: React.FC<RadialMenuProps> = ({
                     actualIconSize={actualIconSize}
                     totalApps={currentLevelApps.length}
                     backdropOpacity={config.backdropOpacity}
+                    labelSize={appearance.labelSize}
+                    tileRoundness={appearance.tileRoundness}
                     hoverColor={radialHoverColor}
                     showLabels={config.showLabels}
                     alwaysShowAppLabels={config.alwaysShowAppLabels ?? false}

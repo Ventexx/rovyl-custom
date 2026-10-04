@@ -5,6 +5,14 @@
 "use strict";
 
 const fs = require("fs");
+const path = require("path");
+
+/** Batch launchers commonly resolve venv, requirements and assets relative to cwd. */
+function getWin32BatchWorkingDirectory(command) {
+  const { exe } = splitWin32SpawnExeAndArgs(command);
+  if (!/\.(bat|cmd)$/i.test(exe) || !path.win32.isAbsolute(exe)) return undefined;
+  return path.win32.dirname(exe);
+}
 
 /**
  * Split the tail of a Windows command line into argv tokens (quoted runs and space-separated words).
@@ -156,6 +164,7 @@ function normalizePersistedPayloadWin32(payload) {
 }
 
 module.exports = {
+  getWin32BatchWorkingDirectory,
   parseWin32CommandLineArgs,
   quoteWin32CmdToken,
   splitWin32SpawnExeAndArgs,

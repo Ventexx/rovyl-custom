@@ -955,6 +955,7 @@ async function createWindow() {
   // Without syncing React (window-hid-to-tray), the renderer still thinks the dashboard is open;
   // reopening from the tray skips showWindow and hit-testing stays broken in the old window rect.
   newWindow.on("close", (event) => {
+    radialOpenGeneration++;
     if (isAppQuitting) {
       return;
     }
@@ -1134,6 +1135,7 @@ function setupMainWindow(window) {
   });
 
   window.webContents.on("render-process-gone", (event, details) => {
+    releaseOverlayInput(window);
     diagLog(
       `Renderer process gone. Reason: ${details.reason}, Exit Code: ${details.exitCode}`,
     );
@@ -1141,6 +1143,8 @@ function setupMainWindow(window) {
       `DEBUG: Renderer process gone. Reason: ${details.reason}, Exit Code: ${details.exitCode}`,
     );
   });
+
+  window.on("unresponsive", () => releaseOverlayInput(window));
 
   window.webContents.on("did-finish-load", () => {
     diagLog("Renderer: Content finished loading successfully");
@@ -1192,10 +1196,34 @@ function setupMainWindow(window) {
 }
 
 let radialOpenPaintSequence = 0;
+let radialOpenGeneration = 0;
+
+/** Fail open: a failed renderer must never leave an invisible input surface. */
+function releaseOverlayInput(window) {
+  radialOpenGeneration++;
+  pendingWindowSize = null;
+  clearRadialMouseBlocking();
+  if (!window || window.isDestroyed()) return;
+  // Independent attempts: a failed native operation must not skip the others.
+  try { window.setIgnoreMouseEvents(true); } catch (_) {}
+  try { window.hide(); } catch (_) {}
+  try { window.setAlwaysOnTop(false); } catch (_) {}
+  if (window === mainWindow) {
+    nativeWindowSizeMode = "small";
+    rendererPanelVisible = false;
+    panelOverlayActive = false;
+    panelOverlayKeptWindow = false;
+    windowBuriedPassive = true;
+  }
+}
 
 /* zenith-verify:radial-handshake-main — prepare → radial-prep-paint-done → open-menu → radial-open-paint-done → show; ver scripts/verify-radial-windowing.mjs */
 function showMenuAtCursor(source = "shortcut") {
   if (!mainWindow || mainWindow.isDestroyed()) return;
+  const openingWindow = mainWindow;
+  const openingGeneration = ++radialOpenGeneration;
+  const isCurrentOpening = () => openingGeneration === radialOpenGeneration &&
+    mainWindow === openingWindow && !openingWindow.isDestroyed();
   const radialOpenStartedAt = Date.now();
 
   /** Posição fixa significa fixa de verdade: nem a posição nem o monitor seguem o cursor. */
@@ -1313,7 +1341,7 @@ function showMenuAtCursor(source = "shortcut") {
   }
 
   const sendOpenMenuAndReveal = (waitForRadialPaint = false) => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!isCurrentOpening()) return;
 
     let radialClientPosition = null;
     let radialWindowOrigin = null;
@@ -1350,7 +1378,7 @@ function showMenuAtCursor(source = "shortcut") {
       if (onRadialPaint) ipcMain.removeListener("radial-open-paint-done", onRadialPaint);
 
       setImmediate(async () => {
-        if (!mainWindow || mainWindow.isDestroyed()) return;
+        if (!isCurrentOpening()) return;
 
         /**
          * Radial por cima do painel sem resize: a janela JÁ está visível, no sítio certo e na
@@ -1363,6 +1391,9 @@ function showMenuAtCursor(source = "shortcut") {
           mainWindow.setIgnoreMouseEvents(false);
           mainWindow.focus();
           mainWindow.webContents.focus();
+          if (typeof paintToken === "number") {
+            mainWindow.webContents.send("radial-native-revealed", paintToken);
+          }
           if (process.platform === "win32") {
             mainWindow.setAlwaysOnTop(true, "screen-saver", 1);
           }
@@ -1391,7 +1422,7 @@ function showMenuAtCursor(source = "shortcut") {
            * garante que o primeiro frame entregue ao DWM seja transparente, nunca meia animação.
            */
           const releaseAnimationTimer = setTimeout(() => {
-            if (!mainWindow || mainWindow.isDestroyed()) return;
+            if (!isCurrentOpening()) return;
             mainWindow.webContents.send("radial-native-revealed", paintToken);
           }, 16);
           releaseAnimationTimer.unref?.();
@@ -1425,12 +1456,19 @@ function showMenuAtCursor(source = "shortcut") {
 
     if (waitForRadialPaint) {
       onRadialPaint = (_event, acknowledgedToken) => {
-        if (acknowledgedToken !== paintToken) return;
+        if (_event.sender !== openingWindow.webContents || acknowledgedToken !== paintToken) return;
         reveal();
       };
       ipcMain.on("radial-open-paint-done", onRadialPaint);
-      // Fallback only: normal path acknowledges after the next painted animation frame.
-      paintTimeout = setTimeout(reveal, wasMinimized ? 240 : 120);
+      // No paint acknowledgement means no safe surface to reveal. Never show a
+      // transparent input blocker merely because the renderer missed a deadline.
+      paintTimeout = setTimeout(() => {
+        ipcMain.removeListener("radial-open-paint-done", onRadialPaint);
+        if (isCurrentOpening()) {
+          diagLog("[RadialOpen] Paint timed out; releasing overlay input");
+          releaseOverlayInput(openingWindow);
+        }
+      }, 2000);
       paintTimeout.unref?.();
     }
 
@@ -1467,7 +1505,7 @@ function showMenuAtCursor(source = "shortcut") {
 
   const wc = mainWindow.webContents;
   if (!wc || wc.isDestroyed()) {
-    sendOpenMenuAndReveal();
+    releaseOverlayInput(openingWindow);
     return;
   }
 
@@ -1483,7 +1521,7 @@ function showMenuAtCursor(source = "shortcut") {
    * e parece “lag” ao abrir. O prep mantém-se só quando minimizado ou HWND oculto (bandeja / flash DWM).
    */
   if (!wasMinimized && visibleOk) {
-    setImmediate(sendOpenMenuAndReveal);
+    setImmediate(() => sendOpenMenuAndReveal(true));
     return;
   }
 
@@ -1916,6 +1954,7 @@ function boundsApproxEqual(a, b, eps = 2) {
  */
 function updateWindowSize(mode, anchorScreenPoint) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mode === "small" || mode === "windowed") radialOpenGeneration++;
   /** Enquanto minimizado não aplicamos `setBounds`; fila e aplicamos no `restore` (flush). */
   try {
     if (mainWindow.isMinimized()) {
@@ -2154,7 +2193,8 @@ function getActiveWinModule() {
 }
 
 /**
- * Rect da janela cobre o monitor inteiro (fullscreen real), não maximizado típico (workArea).
+ * Match fullscreen edges, not merely a window covering the monitor. Maximized
+ * Win32 windows have invisible resize borders extending beyond those edges.
  */
 function isBoundsFullscreenMonitor(bounds, ownerExePathLower) {
   if (!bounds || typeof bounds.width !== "number") return false;
@@ -2172,7 +2212,13 @@ function isBoundsFullscreenMonitor(bounds, ownerExePathLower) {
   const shellBase = path.basename(ownerExePathLower || "").toLowerCase();
   if (shellBase === "explorer.exe") return false;
 
-  const { x, y, width, height } = bounds;
+  let rect = bounds;
+  try {
+    // active-win returns GetWindowRect pixels; Electron displays use DIP.
+    if (process.platform === 'win32') rect = screen.screenToDipRect(null, bounds);
+  } catch (_) { return false; }
+  const { x, y, width, height } = rect;
+  if (![x, y, width, height].every(Number.isFinite)) return false;
   if (width < 320 || height < 240) return false;
 
   const cx = Math.round(x + width / 2);
@@ -2186,20 +2232,21 @@ function isBoundsFullscreenMonitor(bounds, ownerExePathLower) {
 
   const db = display.bounds;
   const wa = display.workArea;
-  const slack = 10;
+  const slack = 1;
 
   const matchesWorkArea =
     Math.abs(x - wa.x) <= slack &&
     Math.abs(y - wa.y) <= slack &&
     Math.abs(width - wa.width) <= slack &&
     Math.abs(height - wa.height) <= slack;
-  if (matchesWorkArea) return false;
+  const workAreaIsDisplay = wa.x === db.x && wa.y === db.y && wa.width === db.width && wa.height === db.height;
+  if (matchesWorkArea && !workAreaIsDisplay) return false;
 
   const coversFullDisplay =
-    x <= db.x + slack &&
-    y <= db.y + slack &&
-    x + width >= db.x + db.width - slack &&
-    y + height >= db.y + db.height - slack;
+    Math.abs(x - db.x) <= slack &&
+    Math.abs(y - db.y) <= slack &&
+    Math.abs(x + width - db.x - db.width) <= slack &&
+    Math.abs(y + height - db.y - db.height) <= slack;
 
   return coversFullDisplay;
 }
@@ -4548,7 +4595,7 @@ ipcMain.on("execute-command", async (event, command, commandType, options = {}) 
         case "exec_start":
           execCmd = `start "" ${escapeCommand(cmd)}`;
           diagLog(`  → [${method}] Running: ${execCmd}`);
-          exec(execCmd, (err, stdout, stderr) => {
+          exec(execCmd, { cwd: win32Launch.getWin32BatchWorkingDirectory(cmd) }, (err, stdout, stderr) => {
             if (err) {
               diagLog(`  ✗ [${method}] Failed: ${err.message}`);
               reject(err);
@@ -4908,6 +4955,11 @@ ipcMain.on("execute-command", async (event, command, commandType, options = {}) 
       ];
     }
 
+    // Batch files need their own folder as cwd, including launchers with arguments.
+    if (process.platform === "win32" && win32Launch.getWin32BatchWorkingDirectory(resolvedCommand)) {
+      methodsToTry = ["exec_start"];
+    }
+
     // Try each method in order
     let lastError = null;
     for (const method of methodsToTry) {
@@ -4941,6 +4993,7 @@ ipcMain.on("execute-command", async (event, command, commandType, options = {}) 
 
 // IPC: Recebe comando para esconder janela
 ipcMain.on("hide-window", () => {
+  radialOpenGeneration++;
   if (!mainWindow || mainWindow.isDestroyed()) return;
 
   clearRadialMouseBlocking();
@@ -5297,6 +5350,7 @@ ipcMain.handle("apply-window-size", (event, mode, anchorScreenPoint) => {
 /** Garante cliques no renderer após abrir widget/radial — limpa passthrough da ilha `small`. */
 ipcMain.handle("ensure-window-interactive", () => {
   if (!mainWindow || mainWindow.isDestroyed()) return false;
+  if (nativeWindowSizeMode === "small" || windowBuriedPassive) return false;
   try {
     if (typeof mainWindow.setShape === "function") {
       mainWindow.setShape([]);
@@ -5536,6 +5590,7 @@ ipcMain.handle("set-window-hit-shape", (event, rects, opts = {}) => {
 
 // IPC: Minimize — hide from taskbar (tray-only), same idea as old “close” that stayed in the tray.
 ipcMain.on("minimize-window", () => {
+  radialOpenGeneration++;
   if (!mainWindow || mainWindow.isDestroyed()) return;
   try {
     mainWindow.setSkipTaskbar(true);
@@ -5628,7 +5683,7 @@ ipcMain.on("quit-app", () => {
 // IPC: Select File (Executable)
 ipcMain.handle("select-file", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
-    properties: ["openFile"],
+    properties: ["openFile", "dontResolveLinks"],
     filters: [
       { name: "Executables", extensions: ["exe", "lnk", "bat", "cmd"] },
       { name: "All Files", extensions: ["*"] },
@@ -5706,7 +5761,7 @@ let iconCache = new Map();
 
 // Bump whenever extract-icon.ps1 changes how icons are produced, so cached
 // entries rendered by the old pipeline are dropped instead of outliving it.
-const ICON_PIPELINE_VERSION = 7;
+const ICON_PIPELINE_VERSION = 8;
 const ICON_CACHE_MAX_ENTRIES = 600;
 
 /**

@@ -550,7 +550,7 @@ export default function App() {
   // ICON NORMALIZATION CACHE-BUST:
   // When the extract-icon.ps1 normalization algorithm changes, bump this version
   // so all stored base64 icons get cleared and re-fetched with the new format.
-  const ICON_NORMALIZATION_VERSION = 'v4-shell-dib-orientation';
+  const ICON_NORMALIZATION_VERSION = 'v5-batch-shortcut-icons';
   useEffect(() => {
     if (!isLoaded) return;
     if (!window.electron?.getFileIcon) return;

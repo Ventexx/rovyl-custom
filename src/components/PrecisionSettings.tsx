@@ -484,7 +484,7 @@ export const PrecisionSettings: React.FC<PrecisionSettingsProps> = ({
         },
         {
           key: 'pause-fullscreen', group: 'Pause Rovyl', title: 'In fullscreen apps',
-          description: 'Pause activation while an app fills the screen. Your mouse button works normally.',
+          description: 'Pause in F11, fullscreen video, and borderless fullscreen games. Regular maximized windows still allow Rovyl. Your mouse button works normally while paused.',
           kind: 'bool', enabled: gameMode.pauseFullscreen ?? (gameMode.enabled && gameMode.mode === 'all'),
           onToggle: () => updateGameMode({ pauseFullscreen: !(gameMode.pauseFullscreen ?? (gameMode.enabled && gameMode.mode === 'all')) }),
         },

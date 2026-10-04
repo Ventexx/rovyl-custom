@@ -694,6 +694,28 @@ function Get-ShortcutIcon {
 
 # ── Main logic ────────────────────────────────────────────────────────────────
 
+# A custom Windows icon belongs to the shortcut, not its .bat target. Older
+# picker selections stored the resolved target, so recover its Start Menu icon
+# before accepting the generic batch-file icon from the shell.
+if ($Target -match '\.(bat|cmd)$' -and (Test-Path -LiteralPath $Target)) {
+    $shortcutShell = New-Object -ComObject WScript.Shell
+    $shortcutRoots = @(
+        "$env:APPDATA\Microsoft\Windows\Start Menu\Programs",
+        "$env:ProgramData\Microsoft\Windows\Start Menu\Programs"
+    )
+    foreach ($root in $shortcutRoots) {
+        foreach ($link in @(Get-ChildItem -LiteralPath $root -Filter '*.lnk' -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName)) {
+            try {
+                $shortcut = $shortcutShell.CreateShortcut($link.FullName)
+                if ($shortcut.TargetPath -ine $Target -or -not $shortcut.IconLocation -or $shortcut.IconLocation -eq ',0') { continue }
+                # Ask Windows for the shortcut icon, retaining its resource index.
+                $res = Get-Base64Icon -Path $link.FullName
+                if ($res) { Write-Output $res; exit }
+            } catch {}
+        }
+    }
+}
+
 # 1. App empacotada (AUMID): asset do pacote e imagem do shell competem, ganha o mais limpo.
 if ($Target -match '!') {
     $res = Select-BestIcon -Producers @(

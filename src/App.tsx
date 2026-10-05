@@ -199,7 +199,8 @@ export default function App() {
   const [minimizeNeutralCoverActive, setMinimizeNeutralCoverActive] = useState(false);
   /** Main: `prepare-radial-show` — pintar antes de `show()` para não expor textura antiga (minimizado/dashboard). */
   const [radialPreShowSolidCover, setRadialPreShowSolidCover] = useState(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(true);
+  // Startup is always idle; only explicit settings actions open the panel.
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [saveStatus, setSaveStatus] = useState<'saving' | 'saved' | 'error'>('saving');
   const [testWorkspace, setTestWorkspace] = useState<Workspace | null>(null);
   const testWorkspaceRef = useRef<Workspace | null>(null);
@@ -1214,20 +1215,7 @@ export default function App() {
     }
 
     if (!hasRunBefore) {
-      /**
-       * Primeira execução: abrir as Definições já.
-       *
-       * Isto esperava pela descoberta do Menu Iniciar, porque nessa altura existia um ecrã de
-       * espera a cobrir tudo. Com o ecrã de espera removido, esperar deixou de fazer sentido:
-       * a janela ficava visível sem superfície nenhuma por baixo, ou seja, um retângulo preto
-       * vazio até a varredura terminar. As Definições abrem de imediato e os atalhos aparecem
-       * lá dentro quando a varredura os trouxer.
-       */
-      flushSync(() => {
-        setPanelResizeSolidCover(true);
-        setIsDashboardOpen(false);
-        setIsSettingsOpen(true);
-      });
+      // Complete first-run bookkeeping silently; Settings is always opt-in.
       localStorage.setItem('zenith_first_run_complete', 'true');
       if (window.electron) {
         setConfig((prev) => ({

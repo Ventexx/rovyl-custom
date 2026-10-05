@@ -71,6 +71,12 @@ if (!process.versions.electron) {
     await waitFor('!!document.querySelector("#root")?.children.length');
     // Let persistence hydrate before simulating the settings IPC event.
     await new Promise(resolve => setTimeout(resolve, 500));
+    assert.ok(await window.webContents.executeJavaScript(`!document.querySelector('.zs-shell') || document.querySelector('.zs-shell').getBoundingClientRect().width === 0`));
+    window.webContents.send('open-menu', { x: 550, y: 400, source: 'shortcut', preSizedByMain: true, clientPosition: { x: 550, y: 400 }, clientSize: { width: 1100, height: 800 } });
+    await waitFor(`document.querySelector('[data-zenith-radial-modal]')?.style.visibility === 'visible'`);
+    assert.ok(await window.webContents.executeJavaScript(`!document.body.innerText.includes('Advanced')`));
+    window.webContents.send('open-menu', { closeOnly: true });
+    await new Promise(resolve => setTimeout(resolve, 500));
     window.webContents.send('open-settings');
     await waitFor('document.body.innerText.includes("Workspaces") && document.body.innerText.includes("Advanced")');
     const visible = await window.webContents.executeJavaScript('document.body.innerText');

@@ -4,7 +4,7 @@
 
 **Quick access to your apps, on your own machine.**
 
-A personal Windows radial launcher based on Rovyl, modified by [Ventexx](https://github.com/Ventexx).
+A personal Windows radial launcher based on [Rovyl](https://github.com/HenryCauan/rovyl), modified by [Ventexx](https://github.com/Ventexx).
 
 </div>
 

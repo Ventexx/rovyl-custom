@@ -4582,6 +4582,19 @@ ipcMain.on("execute-command", async (event, command, commandType, options = {}) 
           });
           break;
         case "exec_start":
+          if (process.platform === "win32") {
+            const batch = win32Launch.getWin32BatchLaunch(cmd);
+            if (batch) {
+              const child = spawn(batch.file, batch.args, batch.options);
+              child.once("error", reject);
+              child.once("spawn", () => {
+                child.unref();
+                diagLog(`  ✓ [${method}] Batch launcher started in a hidden, terminating shell`);
+                resolve(true);
+              });
+              break;
+            }
+          }
           execCmd = `start "" ${escapeCommand(cmd)}`;
           diagLog(`  → [${method}] Running: ${execCmd}`);
           exec(execCmd, { cwd: win32Launch.getWin32BatchWorkingDirectory(cmd) }, (err, stdout, stderr) => {

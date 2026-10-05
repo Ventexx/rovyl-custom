@@ -75,4 +75,14 @@ module.exports = async function afterPackWinIcon(context) {
     },
   });
   console.log(`after-pack-win-icon: set icon and version info on ${exePath}`);
+  const { promisify } = require('node:util');
+  const execFile = promisify(require('node:child_process').execFile);
+  const verification = await execFile(exePath, [
+    path.join(__dirname, 'verify-packaged-runtime.cjs'),
+    path.join(appOutDir, 'resources', 'app.asar'),
+  ], {
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    windowsHide: true, timeout: 40000,
+  });
+  console.log(verification.stdout.trim());
 };

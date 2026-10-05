@@ -16,7 +16,9 @@
    */
   img, svg { -webkit-user-drag: none; user-select: none; }
   #root { width: 100%; height: 100%; }
-  * { scrollbar-width: thin; scrollbar-color: rgba(242, 242, 237, .15) transparent; }
+  /* Keep the existing 6px custom scrollbar: newer Chromium's standard styling
+     otherwise overrides ::-webkit-scrollbar and changes available grid width. */
+  * { scrollbar-width: auto; scrollbar-color: auto; }
   *::-webkit-scrollbar { width: 6px; height: 6px; }
   *::-webkit-scrollbar-thumb { background: rgba(242, 242, 237, .15); border-radius: 999px; }
   *::-webkit-scrollbar-track { background: transparent; }
@@ -184,7 +186,7 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--zn-focus) 18%, transparent);
 }
 .zs-shell ::selection { color: var(--zn-on-solid); background: var(--zn-solid); }
-.zs-shell * { scrollbar-color: var(--zn-line-strong) transparent; }
+.zs-shell * { scrollbar-color: auto; }
 .zs-shell *::-webkit-scrollbar-thumb { background: var(--zn-line-strong); }
 
 .zs-window {

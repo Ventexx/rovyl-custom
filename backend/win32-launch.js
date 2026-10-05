@@ -14,6 +14,23 @@ function getWin32BatchWorkingDirectory(command) {
   return path.win32.dirname(exe);
 }
 
+/** START treats batch files as interactive shells; use an explicit terminating shell. */
+function getWin32BatchLaunch(command) {
+  const { exe } = splitWin32SpawnExeAndArgs(command);
+  if (!/\.(bat|cmd)$/i.test(exe)) return null;
+  return {
+    file: process.env.ComSpec || 'cmd.exe',
+    // Match Node's cmd.exe shell quoting, retaining the original argument quoting.
+    args: ['/d', '/s', '/c', `"${String(command).trim()}"`],
+    options: {
+      cwd: getWin32BatchWorkingDirectory(command),
+      windowsHide: true,
+      windowsVerbatimArguments: true,
+      stdio: 'ignore',
+    },
+  };
+}
+
 /**
  * Split the tail of a Windows command line into argv tokens (quoted runs and space-separated words).
  */
@@ -164,6 +181,7 @@ function normalizePersistedPayloadWin32(payload) {
 }
 
 module.exports = {
+  getWin32BatchLaunch,
   getWin32BatchWorkingDirectory,
   parseWin32CommandLineArgs,
   quoteWin32CmdToken,

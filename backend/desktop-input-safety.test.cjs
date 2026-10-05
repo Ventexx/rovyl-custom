@@ -4,7 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
-const source = fs.readFileSync(path.join(__dirname, 'electron-main.js'), 'utf8');
+// Git may check out CRLF on Windows; source-section markers use LF.
+const source = fs.readFileSync(path.join(__dirname, 'electron-main.js'), 'utf8').replace(/\r\n/g, '\n');
 
 function openingHarness() {
   const ipcMain = new EventEmitter();
@@ -39,6 +40,7 @@ function openingHarness() {
   });
   const start = source.indexOf('let radialOpenPaintSequence = 0;');
   const end = source.indexOf('\n/**\n * Em `small`', start);
+  assert.ok(start >= 0 && end > start, 'radial opening source section must be found');
   vm.runInContext(source.slice(start, end), context);
   return {
     state, window, sent, ipcMain,

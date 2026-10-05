@@ -1,7 +1,7 @@
 {
   "name": "rovyl",
   "private": true,
-  "version": "1.2.6",
+  "version": "1.2.8",
   "main": "backend/electron-main.js",
   "author": "HenryCa",
   "description": "Rovyl radial launcher",
@@ -19,7 +19,8 @@
     "test:persistence-shape": "node scripts/persistence-normalize-smoke.mjs",
     "verify:radial-windowing": "node scripts/verify-radial-windowing.mjs",
     "test": "node --test backend/*.test.cjs && node scripts/persistence-normalize-smoke.mjs && node scripts/verify-radial-windowing.mjs",
-    "test:renderer": "node scripts/smoke-renderer.cjs"
+    "test:renderer": "node scripts/smoke-renderer.cjs",
+    "test:native": "node scripts/smoke-native.cjs"
   },
   "dependencies": {
     "@fontsource-variable/instrument-sans": "^5.3.0",
@@ -34,21 +35,21 @@
     "sql.js": "^1.14.1"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.0",
     "@types/react": "^18.2.37",
     "@types/react-dom": "^18.2.15",
     "@vitejs/plugin-react": "^6.0.5",
     "concurrently": "^8.2.2",
     "cross-env": "^7.0.3",
-    "electron": "^28.3.3",
-    "electron-builder": "^24.9.1",
+    "electron": "43.7.7",
+    "electron-builder": "26.15.3",
     "png-to-ico": "^3.0.1",
     "rcedit": "^4.0.1",
-    "sharp": "^0.35.3",
+    "sharp": "0.35.5",
+    "tailwindcss": "^4.3.0",
     "typescript": "^5.2.2",
     "vite": "^8.2.1",
-    "wait-on": "^7.1.0",
-    "tailwindcss": "^4.3.0",
-    "@tailwindcss/vite": "^4.3.0"
+    "wait-on": "^7.1.0"
   },
   "build": {
     "appId": "com.henry.rovyl",
@@ -69,6 +70,8 @@
     "directories": {
       "output": "build-out"
     },
+    "npmRebuild": false,
+    "beforePack": "./scripts/before-build-native.cjs",
     "afterPack": "./scripts/after-pack-win-icon.cjs",
     "win": {
       "target": [
@@ -95,7 +98,13 @@
     }
   },
   "engines": {
-    "node": "^20.19.0 || >=22.12.0"
+    "node": ">=22.12.0"
   },
-  "license": "GPL-3.0-or-later"
+  "license": "GPL-3.0-or-later",
+  "overrides": {
+    "active-win": {
+      "@mapbox/node-pre-gyp": "2.0.3",
+      "node-gyp": "11.5.0"
+    }
+  }
 }

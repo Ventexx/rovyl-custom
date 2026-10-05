@@ -9,9 +9,35 @@ const {
   splitWin32SpawnExeAndArgs,
   canonicalizeWin32LaunchCommand,
   getWin32BatchWorkingDirectory,
+  getWin32BatchLaunch,
 } = require("./win32-launch.js");
 
 describe("win32-launch", () => {
+  it("runs batch launchers in a hidden shell that exits, preserving cwd and quoted arguments", () => {
+    if (process.platform !== "win32") return;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rovyl-batch-exit-"));
+    const appDir = path.join(dir, "Vael App");
+    fs.mkdirSync(appDir);
+    const launcher = path.join(appDir, "start_silent.bat");
+    fs.writeFileSync(path.join(appDir, "activate.bat"), '@echo off\r\nset VAEL_TEST_VENV=activated\r\n');
+    fs.writeFileSync(launcher, '@echo off\r\ncall activate.bat\r\necho %VAEL_TEST_VENV%\r\necho %1\r\n');
+    try {
+      const launch = getWin32BatchLaunch(`"${launcher}" "Cover & Indexer"`);
+      assert.strictEqual(launch.options.windowsHide, true);
+      const result = require("child_process").spawnSync(launch.file, launch.args, {
+        ...launch.options, stdio: 'pipe', encoding: 'utf8', timeout: 5000,
+      });
+      assert.ifError(result.error);
+      assert.strictEqual(result.status, 0, result.stderr);
+      assert.match(result.stdout, /activated/);
+      assert.match(result.stdout, /Cover & Indexer/);
+      assert.strictEqual(getWin32BatchLaunch('"C:\\Apps\\editor.exe"'), null);
+      assert.strictEqual(getWin32BatchLaunch('https://example.com'), null);
+    } finally {
+      assert.ok(path.resolve(dir).startsWith(path.resolve(os.tmpdir()) + path.sep));
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it("uses the batch folder for quoted paths and arguments, without changing executable launches", () => {
     assert.strictEqual(getWin32BatchWorkingDirectory('"C:\\Vael Apps\\indexer\\start.bat" --debug'), 'C:\\Vael Apps\\indexer');
     assert.strictEqual(getWin32BatchWorkingDirectory('C:\\vael\\cover\\START.CMD'), 'C:\\vael\\cover');

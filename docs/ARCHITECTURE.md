@@ -133,6 +133,18 @@ and auto-update dependencies have been removed. Backend tests are excluded from 
 installed app. `after-pack-win-icon.cjs` still embeds the app icon and version metadata.
 The output is `build-out`, with `ZENITH_BUILD_OUTPUT` available as an override.
 
+Builds require Node 22.12 or newer. Native preparation runs in `beforePack` through
+`before-build-native.cjs`: it verifies active-win's stable Node-API binary and rebuilds
+other native modules. The default rebuild is disabled, but normal production dependency
+collection remains enabled. Do not move this to a `beforeBuild` hook returning false:
+electron-builder 26 also skips dependency collection in that case.
+
+After packaging, `verify-packaged-runtime.cjs` runs with the packaged executable in
+Node mode. Missing production packages, keyboard helpers, native bindings or SQLite
+fail the build before the installer is created. Resolution outside the packaged app
+is rejected, preventing development dependencies from masking missing files.
+`npm run test:native` additionally checks Windows APIs in a hidden test window.
+
 The assisted installer includes an unchecked desktop-shortcut option in `nsis/installer.nsh`;
 automatic desktop shortcut creation is disabled. Its custom uninstall hook cleans up
 opted-in shortcuts, while upgrades preserve existing shortcuts.

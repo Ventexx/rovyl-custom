@@ -2,13 +2,14 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
-const root = path.resolve(__dirname, '..');
+const root = path.resolve(process.env.ROVYL_SMOKE_ROOT || path.join(__dirname, '..'));
+const appRequire = require('node:module').createRequire(path.join(root, 'package.json'));
 
 if (!process.versions.electron) {
   const { spawn } = require('node:child_process');
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawn(require('electron'), [__filename], { env, stdio: 'inherit', windowsHide: true });
+  const child = spawn(appRequire('electron'), [__filename], { env, stdio: 'inherit', windowsHide: true });
   child.on('error', error => { console.error(error); process.exitCode = 1; });
   child.on('exit', code => { process.exitCode = code ?? 1; });
 } else {
@@ -17,7 +18,7 @@ if (!process.versions.electron) {
   app.setPath('userData', path.join(root, 'build-out', 'renderer-smoke-profile'));
   const timeout = setTimeout(() => { console.error('Renderer smoke test timed out'); app.exit(1); }, 40000);
   app.whenReady().then(async () => {
-    const ts = require('typescript');
+    const ts = appRequire('typescript');
     const compiled = ts.transpileModule(fs.readFileSync(path.join(root, 'src/defaults.ts'), 'utf8'), {
       compilerOptions: { module: ts.ModuleKind.CommonJS },
     }).outputText;
@@ -167,9 +168,12 @@ if (!process.versions.electron) {
     await waitFor(`document.querySelectorAll('.zs-icon-library-grid > button').length === 1`);
     await chooseIconCategory('games');
     await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(await window.webContents.executeJavaScript(`getComputedStyle(document.querySelector('.zs-icon-library-grid')).gridTemplateColumns.split(' ').length`), 8,
+      'the 1100px icon picker must retain its original eight-column layout');
     fs.writeFileSync(path.join(root, 'build-out', 'icon-picker-preview.png'), (await window.webContents.capturePage()).toPNG());
     await window.webContents.executeJavaScript(`document.querySelector('.zs-shell').setAttribute('data-zn-theme', 'white')`);
-    await new Promise(resolve => setTimeout(resolve, 100));
+    await window.webContents.executeJavaScript('document.fonts.ready.then(() => true)');
+    await new Promise(resolve => setTimeout(resolve, 500));
     fs.writeFileSync(path.join(root, 'build-out', 'icon-picker-white-preview.png'), (await window.webContents.capturePage()).toPNG());
     await window.webContents.executeJavaScript(`document.querySelector('.zs-shell').setAttribute('data-zn-theme', 'black')`);
     await window.webContents.executeJavaScript(`document.querySelector('[aria-label="Close icon picker"]').click()`);

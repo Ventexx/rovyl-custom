@@ -4,9 +4,11 @@
 
 **Quick access to your apps, on your own machine.**
 
-A personal Windows radial launcher based on Rovyl, modified by [Ventexx](https://github.com/Ventexx).
+A personal Windows radial launcher based on [Rovyl](https://github.com/HenryCauan/rovyl), modified by [Ventexx](https://github.com/Ventexx).
 
 </div>
+
+<img src="docs/media/cover.png" alt="">
 
 ## Features
 
@@ -73,13 +75,9 @@ persistence, or icon handling.
 
 ## Links
 
-The following links refer to the **original Rovyl project**, maintained by Henry Cauan:
+The following link refers to the **original Rovyl project**, maintained by Henry Cauan:
 
 - [Original source](https://github.com/HenryCauan/rovyl)
-- [Microsoft Store listing](https://apps.microsoft.com/detail/9N03SVPMXSV1)
-- [Website and documentation](https://rovyl-red.vercel.app)
-- [Original releases](https://github.com/HenryCauan/rovyl/releases)
-- [Original privacy policy](https://rovyl-red.vercel.app/privacy)
 
 This custom version does not use the original project's online services or update feed.
 

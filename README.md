@@ -8,6 +8,8 @@ A personal Windows radial launcher based on [Rovyl](https://github.com/HenryCaua
 
 </div>
 
+<img src="docs/media/cover.png" alt="">
+
 ## Features
 
 - Launch installed apps, folders, files, and custom commands from a radial menu.
